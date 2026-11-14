@@ -1,0 +1,47 @@
+{
+  "name": "codepulse-tracker",
+  "displayName": "CodePulse Tracker",
+  "description": "Offline-first developer activity analytics for Visual Studio Code.",
+  "version": "1.0.0",
+  "publisher": "eazybel",
+  "license": "MIT",
+  "icon": "media/icon.svg",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other", "Visualization"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {"command":"codepulse.openDashboard","title":"CodePulse: Open Dashboard"},
+      {"command":"codepulse.pauseTracking","title":"CodePulse: Pause Tracking"},
+      {"command":"codepulse.resumeTracking","title":"CodePulse: Resume Tracking"},
+      {"command":"codepulse.exportData","title":"CodePulse: Export Data"},
+      {"command":"codepulse.resetStatistics","title":"CodePulse: Reset Statistics"}
+    ],
+    "configuration": {
+      "title":"CodePulse Tracker",
+      "properties": {
+        "codepulse.trackingMode":{"type":"string","enum":["alwaysOpen","windowFocused"],"default":"alwaysOpen","description":"Track whenever VS Code is running, or only while its window is focused."},
+        "codepulse.focusGracePeriodSeconds":{"type":"number","default":30,"minimum":0,"maximum":3600,"description":"Seconds to continue tracking after VS Code loses focus."},
+        "codepulse.dailyGoalMinutes":{"type":"number","default":240,"minimum":1,"maximum":1440,"description":"Daily activity goal in minutes."},
+        "codepulse.breakReminderMinutes":{"type":"number","default":90,"minimum":0,"maximum":1440,"description":"Reminder interval in tracked minutes. Zero disables reminders."}
+      }
+    }
+  },
+  "scripts": {
+    "clean":"node -e \"require('fs').rmSync('out',{recursive:true,force:true})\"",
+    "compile":"tsc -p .",
+    "watch":"tsc -watch -p .",
+    "test":"npm run compile && mocha \"out/test/**/*.test.js\"",
+    "vscode:prepublish":"npm run compile",
+    "package":"vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/mocha":"10.0.10",
+    "@types/node":"22.15.30",
+    "@types/vscode":"1.100.0",
+    "@vscode/vsce":"3.6.1",
+    "mocha":"11.7.1",
+    "typescript":"5.8.3"
+  }
+}

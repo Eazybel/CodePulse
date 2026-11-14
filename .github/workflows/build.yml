@@ -1,0 +1,28 @@
+name: Build CodePulse Tracker
+on:
+  push:
+    branches: [development]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm install --package-lock-only
+      - run: npm ci
+      - run: npm test
+      - run: npx @vscode/vsce package --no-dependencies
+      - run: zip -r codepulse-tracker-source.zip . -x 'node_modules/*' 'out/*' '.git/*' '*.vsix'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codepulse-tracker-release
+          path: |
+            codepulse-tracker-1.0.0.vsix
+            codepulse-tracker-source.zip
+          if-no-files-found: error
