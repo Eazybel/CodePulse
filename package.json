@@ -1,0 +1,105 @@
+{
+  "name": "codepulse-tracker",
+  "displayName": "CodePulse Tracker",
+  "description": "Offline-first productivity analytics dashboard for VS Code.",
+  "version": "1.0.0",
+  "publisher": "CodePulse",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Eazybel/CodePulse.git"
+  },
+  "engines": {
+    "vscode": "^1.88.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "productivity",
+    "analytics",
+    "tracker",
+    "dashboard",
+    "time tracking"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:codepulse.openDashboard",
+    "onCommand:codepulse.refreshDashboard",
+    "onCommand:codepulse.exportData",
+    "onCommand:codepulse.resetData"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codepulse.openDashboard",
+        "title": "CodePulse: Open Dashboard"
+      },
+      {
+        "command": "codepulse.refreshDashboard",
+        "title": "CodePulse: Refresh Dashboard"
+      },
+      {
+        "command": "codepulse.exportData",
+        "title": "CodePulse: Export Data"
+      },
+      {
+        "command": "codepulse.resetData",
+        "title": "CodePulse: Reset Data"
+      }
+    ],
+    "configuration": [
+      {
+        "title": "CodePulse",
+        "properties": {
+          "codepulse.enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Enable automatic productivity tracking.",
+            "scope": "window"
+          },
+          "codepulse.trackingMode": {
+            "type": "string",
+            "enum": [
+              "alwaysOpen",
+              "windowFocused"
+            ],
+            "default": "alwaysOpen",
+            "description": "Tracking mode used by the extension.",
+            "scope": "window"
+          },
+          "codepulse.focusGracePeriod": {
+            "type": "number",
+            "default": 30,
+            "description": "Grace period in seconds before focus loss is treated as inactive.",
+            "minimum": 0,
+            "maximum": 600,
+            "scope": "window"
+          },
+          "codepulse.minSessionSeconds": {
+            "type": "number",
+            "default": 10,
+            "description": "Minimum activity length kept as a tracked session.",
+            "minimum": 0,
+            "maximum": 3600,
+            "scope": "window"
+          }
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./tsconfig.json",
+    "test": "npm run compile && node --test dist/test/**/*.test.js",
+    "package": "npx @vscode/vsce package --out ./artifacts/codepulse-tracker-1.0.0.vsix",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/vscode": "^1.88.0",
+    "@vscode/vsce": "^3.2.2",
+    "typescript": "^5.6.3"
+  }
+}
