@@ -3,7 +3,7 @@
   "displayName": "CodePulse Tracker",
   "description": "Offline-first productivity analytics dashboard for VS Code.",
   "version": "1.0.3",
-  "publisher": "CodePulse",
+  "publisher": "codepulse-tracker",
   "license": "MIT",
   "repository": {
     "type": "git",
