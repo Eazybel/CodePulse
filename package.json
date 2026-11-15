@@ -9,6 +9,7 @@
     "type": "git",
     "url": "https://github.com/Eazybel/CodePulse.git"
   },
+  "icon": "images/codepulse-icon.png",
   "engines": {
     "vscode": "^1.88.0"
   },
