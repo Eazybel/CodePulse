@@ -31,7 +31,9 @@ export class CodePulseTracker implements vscode.Disposable {
     this.instanceId = randomUUID();
     this.dataStore = dataStore;
     this.leasePath = path.join(context.globalStorageUri.fsPath, 'codepulse-lease.json');
-    this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    this.statusBarItem = vscode.window.createStatusBarItem('codepulse.timer', vscode.StatusBarAlignment.Right, 1000);
+    this.statusBarItem.text = '$(watch) 0s';
+    this.statusBarItem.tooltip = 'CodePulse: Not currently tracking. Click to open the dashboard.';
     this.statusBarItem.command = 'codepulse.openDashboard';
     this.statusBarItem.show();
     this.disposables = [this.statusBarItem];
