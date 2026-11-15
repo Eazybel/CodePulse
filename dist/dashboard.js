@@ -40,6 +40,7 @@ class DashboardPanel {
     static currentPanel;
     panel;
     dataStore;
+    disposed = false;
     constructor(context, dataStore) {
         this.dataStore = dataStore;
         this.panel = vscode.window.createWebviewPanel('codepulse.dashboard', 'CodePulse Tracker', vscode.ViewColumn.One, {
@@ -48,27 +49,41 @@ class DashboardPanel {
         });
         this.panel.webview.html = this.render();
         this.panel.onDidDispose(() => {
-            DashboardPanel.currentPanel = undefined;
+            this.disposed = true;
+            if (DashboardPanel.currentPanel === this) {
+                DashboardPanel.currentPanel = undefined;
+            }
         });
     }
     static create(context, dataStore) {
-        if (DashboardPanel.currentPanel) {
+        if (DashboardPanel.currentPanel && !DashboardPanel.currentPanel.disposed) {
             DashboardPanel.currentPanel.panel.reveal(vscode.ViewColumn.One, true);
             DashboardPanel.currentPanel.refresh();
             return DashboardPanel.currentPanel;
         }
         const panel = new DashboardPanel(context, dataStore);
         DashboardPanel.currentPanel = panel;
+        context.subscriptions.push(panel);
         return panel;
     }
     show() {
+        if (this.disposed) {
+            return;
+        }
         this.panel.reveal(vscode.ViewColumn.One, true);
         this.refresh();
     }
     refresh() {
+        if (this.disposed) {
+            return;
+        }
         this.panel.webview.html = this.render();
     }
     dispose() {
+        if (this.disposed) {
+            return;
+        }
+        this.disposed = true;
         this.panel.dispose();
     }
     render() {

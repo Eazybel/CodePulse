@@ -88,7 +88,6 @@ class CodePulseTracker {
             this.closeActiveInterval();
         }
         this.writeLease();
-        this.dashboardRefresh?.();
     }
     beginActiveInterval() {
         this.activeStartedAt = Date.now();
@@ -102,6 +101,7 @@ class CodePulseTracker {
         const endMs = Date.now();
         const segments = (0, timeUtils_1.splitIntervalAtMidnight)(this.activeStartedAt, endMs);
         const minSessionSeconds = vscode.workspace.getConfiguration('codepulse').get('minSessionSeconds', 10) ?? 10;
+        let savedSession = false;
         for (const segment of segments) {
             const durationSeconds = Math.max(0, Math.round((segment.end - segment.start) / 1000));
             if (durationSeconds < minSessionSeconds) {
@@ -119,9 +119,13 @@ class CodePulseTracker {
                 mode: this.getTrackingMode(),
             };
             this.dataStore.appendSession(session);
+            savedSession = true;
         }
         this.activeStartedAt = null;
         this.focusLostAt = null;
+        if (savedSession) {
+            this.dashboardRefresh?.();
+        }
     }
     shouldTrack() {
         const config = vscode.workspace.getConfiguration('codepulse');

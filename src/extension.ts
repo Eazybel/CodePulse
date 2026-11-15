@@ -7,16 +7,18 @@ import { DashboardPanel } from './dashboard';
 export function activate(context: vscode.ExtensionContext): void {
   const storageDir = context.globalStorageUri?.fsPath ?? context.globalStoragePath;
   const dataStore = new DataStore(storageDir);
-  const dashboard = DashboardPanel.create(context, dataStore);
   const tracker = new CodePulseTracker(context, dataStore);
 
-  tracker.setDashboardRefresh(() => dashboard.refresh());
+  tracker.setDashboardRefresh(() => DashboardPanel.currentPanel?.refresh());
 
   context.subscriptions.push(
     tracker,
-    dashboard,
-    vscode.commands.registerCommand('codepulse.openDashboard', () => dashboard.show()),
-    vscode.commands.registerCommand('codepulse.refreshDashboard', () => dashboard.refresh()),
+    vscode.commands.registerCommand('codepulse.openDashboard', () => {
+      DashboardPanel.create(context, dataStore).show();
+    }),
+    vscode.commands.registerCommand('codepulse.refreshDashboard', () => {
+      DashboardPanel.create(context, dataStore).show();
+    }),
     vscode.commands.registerCommand('codepulse.exportData', async () => {
       const saveUri = await vscode.window.showSaveDialog({
         defaultUri: vscode.Uri.joinPath(context.globalStorageUri, 'codepulse-export.json'),
@@ -45,13 +47,12 @@ export function activate(context: vscode.ExtensionContext): void {
       }
 
       dataStore.reset();
-      dashboard.refresh();
+      DashboardPanel.currentPanel?.refresh();
       void vscode.window.showInformationMessage('CodePulse data reset.');
     }),
   );
 
   tracker.start();
-  dashboard.refresh();
 }
 
 export function deactivate(): void {

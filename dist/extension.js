@@ -42,10 +42,13 @@ const dashboard_1 = require("./dashboard");
 function activate(context) {
     const storageDir = context.globalStorageUri?.fsPath ?? context.globalStoragePath;
     const dataStore = new dataStore_1.DataStore(storageDir);
-    const dashboard = dashboard_1.DashboardPanel.create(context, dataStore);
     const tracker = new tracker_1.CodePulseTracker(context, dataStore);
-    tracker.setDashboardRefresh(() => dashboard.refresh());
-    context.subscriptions.push(tracker, dashboard, vscode.commands.registerCommand('codepulse.openDashboard', () => dashboard.show()), vscode.commands.registerCommand('codepulse.refreshDashboard', () => dashboard.refresh()), vscode.commands.registerCommand('codepulse.exportData', async () => {
+    tracker.setDashboardRefresh(() => dashboard_1.DashboardPanel.currentPanel?.refresh());
+    context.subscriptions.push(tracker, vscode.commands.registerCommand('codepulse.openDashboard', () => {
+        dashboard_1.DashboardPanel.create(context, dataStore).show();
+    }), vscode.commands.registerCommand('codepulse.refreshDashboard', () => {
+        dashboard_1.DashboardPanel.create(context, dataStore).show();
+    }), vscode.commands.registerCommand('codepulse.exportData', async () => {
         const saveUri = await vscode.window.showSaveDialog({
             defaultUri: vscode.Uri.joinPath(context.globalStorageUri, 'codepulse-export.json'),
             saveLabel: 'Export CodePulse data',
@@ -64,11 +67,10 @@ function activate(context) {
             return;
         }
         dataStore.reset();
-        dashboard.refresh();
+        dashboard_1.DashboardPanel.currentPanel?.refresh();
         void vscode.window.showInformationMessage('CodePulse data reset.');
     }));
     tracker.start();
-    dashboard.refresh();
 }
 function deactivate() {
     // Intentionally empty: cleanup is handled via disposables.

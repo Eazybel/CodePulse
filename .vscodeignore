@@ -2,6 +2,11 @@
 **/.DS_Store
 **/*.map
 node_modules/**
+artifacts/**
+dist/test/**
+.github/**
+PRODUCTION_CHECKLIST.md
+tsconfig.json
 .gitignore
 src/**
 .vscode/**

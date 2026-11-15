@@ -8,6 +8,7 @@ export class DashboardPanel implements vscode.Disposable {
 
   private readonly panel: vscode.WebviewPanel;
   private readonly dataStore: DataStore;
+  private disposed = false;
 
   public constructor(context: vscode.ExtensionContext, dataStore: DataStore) {
     this.dataStore = dataStore;
@@ -23,12 +24,15 @@ export class DashboardPanel implements vscode.Disposable {
 
     this.panel.webview.html = this.render();
     this.panel.onDidDispose(() => {
-      DashboardPanel.currentPanel = undefined;
+      this.disposed = true;
+      if (DashboardPanel.currentPanel === this) {
+        DashboardPanel.currentPanel = undefined;
+      }
     });
   }
 
   public static create(context: vscode.ExtensionContext, dataStore: DataStore): DashboardPanel {
-    if (DashboardPanel.currentPanel) {
+    if (DashboardPanel.currentPanel && !DashboardPanel.currentPanel.disposed) {
       DashboardPanel.currentPanel.panel.reveal(vscode.ViewColumn.One, true);
       DashboardPanel.currentPanel.refresh();
       return DashboardPanel.currentPanel;
@@ -36,19 +40,33 @@ export class DashboardPanel implements vscode.Disposable {
 
     const panel = new DashboardPanel(context, dataStore);
     DashboardPanel.currentPanel = panel;
+    context.subscriptions.push(panel);
     return panel;
   }
 
   public show(): void {
+    if (this.disposed) {
+      return;
+    }
+
     this.panel.reveal(vscode.ViewColumn.One, true);
     this.refresh();
   }
 
   public refresh(): void {
+    if (this.disposed) {
+      return;
+    }
+
     this.panel.webview.html = this.render();
   }
 
   public dispose(): void {
+    if (this.disposed) {
+      return;
+    }
+
+    this.disposed = true;
     this.panel.dispose();
   }
 

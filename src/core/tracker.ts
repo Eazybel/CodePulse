@@ -75,7 +75,6 @@ export class CodePulseTracker implements vscode.Disposable {
     }
 
     this.writeLease();
-    this.dashboardRefresh?.();
   }
 
   private beginActiveInterval(): void {
@@ -93,6 +92,7 @@ export class CodePulseTracker implements vscode.Disposable {
     const segments = splitIntervalAtMidnight(this.activeStartedAt, endMs);
 
     const minSessionSeconds = vscode.workspace.getConfiguration('codepulse').get<number>('minSessionSeconds', 10) ?? 10;
+    let savedSession = false;
 
     for (const segment of segments) {
       const durationSeconds = Math.max(0, Math.round((segment.end - segment.start) / 1000));
@@ -113,10 +113,15 @@ export class CodePulseTracker implements vscode.Disposable {
       };
 
       this.dataStore.appendSession(session);
+      savedSession = true;
     }
 
     this.activeStartedAt = null;
     this.focusLostAt = null;
+
+    if (savedSession) {
+      this.dashboardRefresh?.();
+    }
   }
 
   private shouldTrack(): boolean {

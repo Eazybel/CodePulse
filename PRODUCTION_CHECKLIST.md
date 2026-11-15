@@ -5,7 +5,7 @@
 - [x] Core tracking engine architecture in place.
 - [x] Local JSON data persistence implemented.
 - [x] Dashboard webview scaffold implemented.
-- [ ] Compile and fix TypeScript errors.
-- [ ] Run focused validation tests.
-- [ ] Build VSIX artifact and verify package contents.
+- [x] Fix repeated `Webview is disposed` errors by stopping timer-driven dashboard refreshes and guarding disposed panels.
+- [x] Compile and run focused validation tests.
+- [x] Build the 1.0.1 VSIX artifact and verify package contents.
 - [ ] Review remaining security and packaging issues.
