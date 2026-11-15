@@ -4,6 +4,7 @@ exports.getLocalDateKey = getLocalDateKey;
 exports.clampDuration = clampDuration;
 exports.splitIntervalAtMidnight = splitIntervalAtMidnight;
 exports.formatDuration = formatDuration;
+exports.formatDurationMinutes = formatDurationMinutes;
 function getLocalDateKey(date) {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -49,6 +50,19 @@ function formatDuration(totalSeconds) {
         parts.push(`${minutes}m`);
     }
     parts.push(`${remainingSeconds}s`);
+    return parts.join(' ');
+}
+function formatDurationMinutes(totalMinutes) {
+    const minutes = Number.isFinite(totalMinutes) ? Math.max(0, Math.floor(totalMinutes)) : 0;
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    const parts = [];
+    if (hours > 0) {
+        parts.push(`${hours}h`);
+    }
+    if (remainingMinutes > 0 || hours === 0) {
+        parts.push(`${remainingMinutes}m`);
+    }
     return parts.join(' ');
 }
 //# sourceMappingURL=timeUtils.js.map

@@ -77,3 +77,20 @@ export function formatDuration(totalSeconds: number): string {
 
   return parts.join(' ');
 }
+
+export function formatDurationMinutes(totalMinutes: number): string {
+  const minutes = Number.isFinite(totalMinutes) ? Math.max(0, Math.floor(totalMinutes)) : 0;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  const parts: string[] = [];
+
+  if (hours > 0) {
+    parts.push(`${hours}h`);
+  }
+
+  if (remainingMinutes > 0 || hours === 0) {
+    parts.push(`${remainingMinutes}m`);
+  }
+
+  return parts.join(' ');
+}

@@ -41,6 +41,12 @@ const timeUtils_1 = require("../core/timeUtils");
         assert.equal((0, timeUtils_1.formatDuration)(61), '1m 1s');
         assert.equal((0, timeUtils_1.formatDuration)(3661), '1h 1m 1s');
     });
+    (0, node_test_1.it)('formats elapsed minutes without seconds', () => {
+        assert.equal((0, timeUtils_1.formatDurationMinutes)(0), '0m');
+        assert.equal((0, timeUtils_1.formatDurationMinutes)(59), '59m');
+        assert.equal((0, timeUtils_1.formatDurationMinutes)(60), '1h');
+        assert.equal((0, timeUtils_1.formatDurationMinutes)(62), '1h 2m');
+    });
     (0, node_test_1.it)('splits intervals at local midnight boundaries', () => {
         const start = new Date(2024, 5, 1, 23, 30, 0).getTime();
         const end = new Date(2024, 5, 2, 0, 45, 0).getTime();

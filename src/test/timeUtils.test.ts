@@ -1,12 +1,19 @@
 import * as assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { formatDuration, splitIntervalAtMidnight } from '../core/timeUtils';
+import { formatDuration, formatDurationMinutes, splitIntervalAtMidnight } from '../core/timeUtils';
 
 describe('time utilities', () => {
   it('formats short durations', () => {
     assert.equal(formatDuration(61), '1m 1s');
     assert.equal(formatDuration(3661), '1h 1m 1s');
+  });
+
+  it('formats elapsed minutes without seconds', () => {
+    assert.equal(formatDurationMinutes(0), '0m');
+    assert.equal(formatDurationMinutes(59), '59m');
+    assert.equal(formatDurationMinutes(60), '1h');
+    assert.equal(formatDurationMinutes(62), '1h 2m');
   });
 
   it('splits intervals at local midnight boundaries', () => {
