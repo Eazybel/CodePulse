@@ -44,6 +44,7 @@ class CodePulseTracker {
     dataStore;
     leasePath;
     timer;
+    statusBarItem;
     disposables;
     activeStartedAt = null;
     activeProject = 'Workspace';
@@ -54,7 +55,10 @@ class CodePulseTracker {
         this.instanceId = (0, node_crypto_1.randomUUID)();
         this.dataStore = dataStore;
         this.leasePath = path.join(context.globalStorageUri.fsPath, 'codepulse-lease.json');
-        this.disposables = [];
+        this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+        this.statusBarItem.command = 'codepulse.openDashboard';
+        this.statusBarItem.show();
+        this.disposables = [this.statusBarItem];
         this.timer = setInterval(() => this.tick(), 1000);
     }
     setDashboardRefresh(handler) {
@@ -77,6 +81,7 @@ class CodePulseTracker {
         const enabled = vscode.workspace.getConfiguration('codepulse').get('enabled', true);
         if (!enabled) {
             this.closeActiveInterval();
+            this.updateStatusBar();
             this.writeLease();
             return;
         }
@@ -87,7 +92,18 @@ class CodePulseTracker {
         if (!shouldTrack && this.activeStartedAt !== null) {
             this.closeActiveInterval();
         }
+        this.updateStatusBar();
         this.writeLease();
+    }
+    updateStatusBar() {
+        if (this.activeStartedAt === null) {
+            this.statusBarItem.text = '$(watch) 0s';
+            this.statusBarItem.tooltip = 'CodePulse: Not currently tracking. Click to open the dashboard.';
+            return;
+        }
+        const elapsedSeconds = Math.floor((Date.now() - this.activeStartedAt) / 1000);
+        this.statusBarItem.text = `$(watch) ${(0, timeUtils_1.formatDuration)(elapsedSeconds)}`;
+        this.statusBarItem.tooltip = 'CodePulse: Time tracked in the current session. Click to open the dashboard.';
     }
     beginActiveInterval() {
         this.activeStartedAt = Date.now();

@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 
 import { DataStore, StoredSession } from './dataStore';
-import { splitIntervalAtMidnight, TrackingMode } from './timeUtils';
+import { formatDuration, splitIntervalAtMidnight, TrackingMode } from './timeUtils';
 
 interface LeaseState {
   instanceId: string;
@@ -18,6 +18,7 @@ export class CodePulseTracker implements vscode.Disposable {
   private readonly dataStore: DataStore;
   private readonly leasePath: string;
   private readonly timer: NodeJS.Timeout;
+  private readonly statusBarItem: vscode.StatusBarItem;
   private readonly disposables: vscode.Disposable[];
 
   private activeStartedAt: number | null = null;
@@ -30,7 +31,10 @@ export class CodePulseTracker implements vscode.Disposable {
     this.instanceId = randomUUID();
     this.dataStore = dataStore;
     this.leasePath = path.join(context.globalStorageUri.fsPath, 'codepulse-lease.json');
-    this.disposables = [];
+    this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    this.statusBarItem.command = 'codepulse.openDashboard';
+    this.statusBarItem.show();
+    this.disposables = [this.statusBarItem];
     this.timer = setInterval(() => this.tick(), 1000);
   }
 
@@ -61,6 +65,7 @@ export class CodePulseTracker implements vscode.Disposable {
     const enabled = vscode.workspace.getConfiguration('codepulse').get<boolean>('enabled', true);
     if (!enabled) {
       this.closeActiveInterval();
+      this.updateStatusBar();
       this.writeLease();
       return;
     }
@@ -74,7 +79,20 @@ export class CodePulseTracker implements vscode.Disposable {
       this.closeActiveInterval();
     }
 
+    this.updateStatusBar();
     this.writeLease();
+  }
+
+  private updateStatusBar(): void {
+    if (this.activeStartedAt === null) {
+      this.statusBarItem.text = '$(watch) 0s';
+      this.statusBarItem.tooltip = 'CodePulse: Not currently tracking. Click to open the dashboard.';
+      return;
+    }
+
+    const elapsedSeconds = Math.floor((Date.now() - this.activeStartedAt) / 1000);
+    this.statusBarItem.text = `$(watch) ${formatDuration(elapsedSeconds)}`;
+    this.statusBarItem.tooltip = 'CodePulse: Time tracked in the current session. Click to open the dashboard.';
   }
 
   private beginActiveInterval(): void {

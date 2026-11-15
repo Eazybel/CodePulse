@@ -8,6 +8,7 @@ CodePulse Tracker is a lightweight, offline-first productivity analytics extensi
 - Support for `alwaysOpen` and `windowFocused` modes
 - Grace-period handling for focus loss
 - Shared heartbeat lease coordination to reduce duplicate counting across windows
+- Live status-bar timer for the current tracking session
 - Local JSON persistence with export/reset controls
 - Dashboard with recent sessions, totals, and project breakdowns
 
