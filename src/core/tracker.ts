@@ -4,8 +4,10 @@ import { randomUUID } from 'node:crypto';
 
 import * as vscode from 'vscode';
 
-import { DataStore, StoredSession } from './dataStore';
+import { DataStore, sessionIdFor, StoredSession } from './dataStore';
 import { formatDurationMinutes, splitIntervalAtMidnight, TrackingMode } from './timeUtils';
+
+const CHECKPOINT_INTERVAL_MS = 5_000;
 
 interface LeaseState {
   instanceId: string;

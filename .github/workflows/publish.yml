@@ -1,5 +1,9 @@
 name: CI and Marketplace release
 
+# Publishes to the VS Code Marketplace when a version tag such as v1.0.4 is pushed.
+# The tag must match the "version" in package.json. Requires the VSCE_PAT repository
+# secret (an Azure DevOps personal access token with Marketplace "Manage" scope).
+
 on:
   push:
     branches:
@@ -14,6 +18,9 @@ on:
         required: true
         default: false
         type: boolean
+
+permissions:
+  contents: read
 
 permissions:
   contents: read

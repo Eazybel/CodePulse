@@ -52,6 +52,7 @@ const LOCK_STALE_MS = 30_000;
 const WRITE_DEBOUNCE_MS = 1_500;
 
 export class DataStore {
+  private readonly storageDir: string;
   private readonly filePath: string;
   private readonly lockPath: string;
   private readonly reportError: (message: string, error: unknown) => void;
@@ -74,6 +75,7 @@ export class DataStore {
   }
 
   public getSnapshot(): CodePulseSnapshot {
+    this.reloadIfChanged();
     return this.snapshot;
   }
 
