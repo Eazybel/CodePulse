@@ -1,4 +1,4 @@
-name: Publish VS Code Extension
+name: CI and Marketplace release
 
 # Publishes to the VS Code Marketplace when a version tag such as v1.0.4 is pushed.
 # The tag must match the "version" in package.json. Requires the VSCE_PAT repository
@@ -6,22 +6,82 @@ name: Publish VS Code Extension
 
 on:
   push:
+    branches:
+      - '**'
     tags:
       - 'v*'
+  pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: Publish this version to the Visual Studio Marketplace
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
 
 permissions:
   contents: read
 
 jobs:
-  publish:
+  validate:
     runs-on: ubuntu-latest
-
+    outputs:
+      version: ${{ steps.version.outputs.value }}
     steps:
-      - name: Checkout code
+      - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Read extension version
+        id: version
+        run: node -e "require('fs').appendFileSync(process.env.GITHUB_OUTPUT, 'value=' + require('./package.json').version + '\n')"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Package VSIX
+        run: npx @vscode/vsce package --out "artifacts/codepulse-tracker-${{ steps.version.outputs.value }}.vsix"
+
+      - name: Upload VSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: codepulse-tracker-${{ steps.version.outputs.value }}
+          path: artifacts/codepulse-tracker-${{ steps.version.outputs.value }}.vsix
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: >-
+      (github.event_name == 'push' &&
+       github.ref == format('refs/tags/v{0}', needs.validate.outputs.version)) ||
+      (github.event_name == 'workflow_dispatch' && inputs.release)
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -30,39 +90,5 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Check tag matches package.json version
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          PKG_VERSION="$(node -p "require('./package.json').version")"
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "Tag $GITHUB_REF_NAME does not match package.json version $PKG_VERSION" >&2
-            exit 1
-          fi
-
-      - name: Compile and run tests
-        run: npm test
-
-      - name: Check publishing token is configured
-        run: |
-          if [ -z "$VSCE_PAT" ]; then
-            echo "The VSCE_PAT repository secret is not set." >&2
-            exit 1
-          fi
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-
-      - name: Package extension
-        run: npx @vscode/vsce package --out ./codepulse-tracker.vsix
-
-      - name: Publish to VS Code Marketplace
-        run: npx @vscode/vsce publish --packagePath ./codepulse-tracker.vsix -p "$VSCE_PAT"
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-
-      - name: Upload VSIX
-        uses: actions/upload-artifact@v4
-        with:
-          name: codepulse-tracker-vsix
-          path: codepulse-tracker.vsix
-          if-no-files-found: error
+      - name: Publish with Marketplace Trusted Publishing
+        run: npx @vscode/vsce publish --oidc

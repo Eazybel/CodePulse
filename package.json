@@ -2,7 +2,7 @@
   "name": "codepulse-tracker",
   "displayName": "CodePulse Tracker",
   "description": "Offline-first productivity analytics dashboard for VS Code.",
-  "version": "1.1.1",
+  "version": "1.1.0",
   "publisher": "codepulse-tracker",
   "license": "MIT",
   "repository": {
@@ -29,6 +29,8 @@
     "onCommand:codepulse.openDashboard",
     "onCommand:codepulse.refreshDashboard",
     "onCommand:codepulse.exportData",
+    "onCommand:codepulse.exportJson",
+    "onCommand:codepulse.exportCsv",
     "onCommand:codepulse.resetData"
   ],
   "main": "./dist/extension.js",
@@ -45,6 +47,14 @@
       {
         "command": "codepulse.exportData",
         "title": "CodePulse: Export Data"
+      },
+      {
+        "command": "codepulse.exportJson",
+        "title": "CodePulse: Export JSON"
+      },
+      {
+        "command": "codepulse.exportCsv",
+        "title": "CodePulse: Export CSV"
       },
       {
         "command": "codepulse.resetData",
@@ -86,6 +96,14 @@
             "minimum": 0,
             "maximum": 3600,
             "scope": "window"
+          },
+          "codepulse.dailyGoalMinutes": {
+            "type": "number",
+            "default": 120,
+            "description": "Daily coding goal in minutes, used by dashboard progress and goal analytics.",
+            "minimum": 1,
+            "maximum": 1440,
+            "scope": "window"
           }
         }
       }
@@ -93,14 +111,22 @@
   },
   "scripts": {
     "compile": "tsc -p ./tsconfig.json",
-    "test": "npm run compile && node --test dist/test/*.test.js",
-    "package": "npx @vscode/vsce package --out ./artifacts/codepulse-tracker-1.1.1.vsix",
+    "typecheck": "tsc -p ./tsconfig.json --noEmit",
+    "lint": "eslint src --max-warnings=0",
+    "test": "npm run compile && node --test dist/test/**/*.test.js",
+    "package": "npm run compile && vsce package --out ./artifacts/codepulse-tracker-1.1.0.vsix",
     "vscode:prepublish": "npm run compile"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/vscode": "^1.88.0",
-    "@vscode/vsce": "^3.2.2",
+    "@vscode/vsce": "^4.1.1",
+    "@typescript-eslint/eslint-plugin": "^8.72.2",
+    "@typescript-eslint/parser": "^8.72.2",
+    "eslint": "^10.15.0",
     "typescript": "^5.6.3"
+  },
+  "overrides": {
+    "minimatch": "^11.0.1"
   }
 }
