@@ -4,8 +4,10 @@ import { randomUUID } from 'node:crypto';
 
 import * as vscode from 'vscode';
 
-import { DataStore, StoredSession } from './dataStore';
+import { DataStore, sessionIdFor, StoredSession } from './dataStore';
 import { formatDurationMinutes, splitIntervalAtMidnight, TrackingMode } from './timeUtils';
+
+const CHECKPOINT_INTERVAL_MS = 5_000;
 
 interface LeaseState {
   instanceId: string;
@@ -25,6 +27,7 @@ export class CodePulseTracker implements vscode.Disposable {
   private activeProject = 'Workspace';
   private activeLanguage = 'Unknown';
   private focusLostAt: number | null = null;
+  private lastCheckpointAt = 0;
   private dashboardRefresh: (() => void) | undefined;
 
   public constructor(context: vscode.ExtensionContext, dataStore: DataStore) {
@@ -49,6 +52,12 @@ export class CodePulseTracker implements vscode.Disposable {
       vscode.window.onDidChangeActiveTextEditor(() => this.tick()),
       vscode.window.onDidChangeWindowState(() => this.tick()),
     );
+
+    // Recover time from windows that were closed abruptly before they could save it.
+    const minSessionSeconds = vscode.workspace.getConfiguration('codepulse').get<number>('minSessionSeconds', 10) ?? 10;
+    if (this.dataStore.recoverStaleCheckpoints(this.instanceId, minSessionSeconds) > 0) {
+      this.dashboardRefresh?.();
+    }
 
     this.tick();
   }
@@ -83,6 +92,10 @@ export class CodePulseTracker implements vscode.Disposable {
       this.closeActiveInterval();
     }
 
+    if (this.activeStartedAt !== null && Date.now() - this.lastCheckpointAt >= CHECKPOINT_INTERVAL_MS) {
+      this.writeCheckpoint();
+    }
+
     this.updateStatusBar();
     if (shouldTrack) {
       this.writeLease();
@@ -90,21 +103,38 @@ export class CodePulseTracker implements vscode.Disposable {
   }
 
   private updateStatusBar(): void {
-    if (this.activeStartedAt === null) {
-      this.statusBarItem.text = '$(watch) 0m';
-      this.statusBarItem.tooltip = 'CodePulse: Not currently tracking. Click to open the dashboard.';
-      return;
-    }
-
-    const elapsedMinutes = Math.floor((Date.now() - this.activeStartedAt) / 60_000);
-    this.statusBarItem.text = `$(watch) ${formatDurationMinutes(elapsedMinutes)}`;
-    this.statusBarItem.tooltip = 'CodePulse: Time tracked in the current session. Click to open the dashboard.';
+    // Show the whole day's total (saved sessions plus the one running now), so the
+    // count carries on across VS Code restarts instead of starting from 0m again.
+    const todayMinutes = Math.floor(this.dataStore.getTodaySeconds() / 60);
+    this.statusBarItem.text = `$(watch) ${formatDurationMinutes(todayMinutes)}`;
+    this.statusBarItem.tooltip = this.activeStartedAt === null
+      ? "CodePulse: Time tracked today. Not tracking right now. Click to open the dashboard."
+      : "CodePulse: Time tracked today (tracking now). Click to open the dashboard.";
   }
 
   private beginActiveInterval(): void {
     this.activeStartedAt = Date.now();
     this.activeProject = this.resolveProjectName();
     this.activeLanguage = this.resolveLanguage();
+    this.dataStore.setLiveInterval(this.activeStartedAt);
+    this.writeCheckpoint();
+  }
+
+  private writeCheckpoint(): void {
+    if (this.activeStartedAt === null) {
+      return;
+    }
+
+    const now = Date.now();
+    this.dataStore.writeCheckpoint({
+      instanceId: this.instanceId,
+      start: this.activeStartedAt,
+      lastSeen: now,
+      project: this.activeProject,
+      language: this.activeLanguage,
+      mode: this.getTrackingMode(),
+    });
+    this.lastCheckpointAt = now;
   }
 
   private closeActiveInterval(): void {
@@ -125,7 +155,7 @@ export class CodePulseTracker implements vscode.Disposable {
       }
 
       const session: StoredSession = {
-        id: randomUUID(),
+        id: sessionIdFor(this.instanceId, segment.start),
         start: segment.start,
         end: segment.end,
         durationSeconds,
@@ -142,6 +172,8 @@ export class CodePulseTracker implements vscode.Disposable {
 
     this.activeStartedAt = null;
     this.focusLostAt = null;
+    this.dataStore.setLiveInterval(null);
+    this.dataStore.clearCheckpoint(this.instanceId);
 
     if (savedSession) {
       this.dashboardRefresh?.();
