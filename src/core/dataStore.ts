@@ -67,6 +67,8 @@ export function sessionIdFor(instanceId: string, segmentStart: number): string {
 }
 
 export class DataStore {
+  private static readonly sharedStores = new Map<string, DataStore>();
+
   private readonly storageDir: string;
   private readonly filePath: string;
   private readonly lockPath: string;
@@ -84,6 +86,23 @@ export class DataStore {
     storageDir: string,
     reportError: (message: string, error: unknown) => void = (message, error) => console.error(message, error),
   ) {
+    const existing = DataStore.sharedStores.get(storageDir);
+    if (existing) {
+      this.storageDir = existing.storageDir;
+      this.filePath = existing.filePath;
+      this.lockPath = existing.lockPath;
+      this.reportError = existing.reportError;
+      this.snapshot = existing.snapshot;
+      this.sessionIds = existing.sessionIds;
+      this.pendingSessionVersions = existing.pendingSessionVersions;
+      this.revision = existing.revision;
+      this.writeQueue = existing.writeQueue;
+      this.flushTimer = existing.flushTimer;
+      this.loadedMtimeMs = existing.loadedMtimeMs;
+      this.liveStartMs = existing.liveStartMs;
+      return;
+    }
+
     this.storageDir = storageDir;
     this.filePath = path.join(storageDir, 'codepulse-state.json');
     this.lockPath = `${this.filePath}.lock`;
@@ -91,89 +110,89 @@ export class DataStore {
     this.snapshot = this.readSnapshot();
     this.sessionIds = new Set(this.snapshot.sessions.map((session) => session.id));
     this.loadedMtimeMs = this.currentMtimeMs();
+    DataStore.sharedStores.set(storageDir, this);
   }
 
-  public getSnapshot(): CodePulseSnapshot {
-    this.reloadIfChanged();
-    return this.snapshot;
-  }
-
-  /** Includes an unsaved live interval in daily totals and dashboard statistics. */
-  public setLiveInterval(startMs: number | null): void {
-    this.liveStartMs = startMs;
+  private currentStore(): DataStore {
+    return DataStore.sharedStores.get(this.storageDir) ?? this;
   }
 
   public getTodaySeconds(now: number = Date.now()): number {
-    this.reloadIfChanged();
+    const store = this.currentStore();
+    store.reloadIfChanged();
     const today = getLocalDateKey(new Date(now));
-    const saved = this.snapshot.sessions
+    const saved = store.snapshot.sessions
       .filter((session) => session.localDate === today)
       .reduce((sum, session) => sum + session.durationSeconds, 0);
-    const liveMs = this.liveSegments(now)
+    const liveMs = store.liveSegments(now)
       .filter((segment) => segment.dateKey === today)
       .reduce((sum, segment) => sum + segment.end - segment.start, 0);
     return saved + Math.round(liveMs / 1000);
   }
 
   public appendSession(session: StoredSession): void {
+    const store = this.currentStore();
     if (!isValidSession(session)) {
       throw new TypeError('Cannot append an invalid CodePulse session.');
     }
-    this.reloadIfChanged();
-    if (this.sessionIds.has(session.id)) {
+    store.reloadIfChanged();
+    if (store.sessionIds.has(session.id)) {
       return;
     }
 
-    const sessions = this.snapshot.sessions;
+    const sessions = store.snapshot.sessions;
     const previous = sessions[sessions.length - 1];
     if (previous && canMergeSessions(previous, session)) {
       previous.end = Math.max(previous.end, session.end);
       previous.durationSeconds = (previous.end - previous.start) / 1000;
-      this.markPending(previous.id);
+      store.markPending(previous.id);
     } else {
       sessions.push({ ...session });
       sessions.sort((left, right) => left.start - right.start);
-      this.sessionIds.add(session.id);
-      this.markPending(session.id);
+      store.sessionIds.add(session.id);
+      store.markPending(session.id);
     }
-    this.snapshot.lastUpdated = Date.now();
-    this.schedulePersist();
+    store.snapshot.lastUpdated = Date.now();
+    store.schedulePersist();
   }
 
   public async reset(): Promise<void> {
-    this.clearFlushTimer();
-    this.snapshot = {
+    const store = this.currentStore();
+    store.clearFlushTimer();
+    store.snapshot = {
       version: 2,
       generation: randomUUID(),
       resetAt: Date.now(),
       sessions: [],
       lastUpdated: Date.now(),
     };
-    this.revision += 1;
-    this.pendingSessionVersions.clear();
-    this.sessionIds.clear();
-    await this.enqueuePersist(true);
+    store.revision += 1;
+    store.pendingSessionVersions.clear();
+    store.sessionIds.clear();
+    await store.enqueuePersist(true);
   }
 
   public async flush(): Promise<void> {
-    this.clearFlushTimer();
-    await this.enqueuePersist();
+    const store = this.currentStore();
+    store.clearFlushTimer();
+    await store.enqueuePersist();
   }
 
   public async refreshFromDisk(): Promise<void> {
-    const revisionAtStart = this.revision;
-    const generationAtStart = this.snapshot.generation;
-    const diskSnapshot = await this.readDiskSnapshot();
-    if (this.revision !== revisionAtStart && this.snapshot.generation !== generationAtStart) {
+    const store = this.currentStore();
+    const revisionAtStart = store.revision;
+    const generationAtStart = store.snapshot.generation;
+    const diskSnapshot = await store.readDiskSnapshot();
+    if (store.revision !== revisionAtStart && store.snapshot.generation !== generationAtStart) {
       return;
     }
-    const localPending = this.snapshot.sessions.filter((session) => this.pendingSessionVersions.has(session.id));
+    const localPending = store.snapshot.sessions.filter((session) => store.pendingSessionVersions.has(session.id));
     const retained = diskSnapshot.generation === generationAtStart
       ? localPending
       : clipSessionsAfter(localPending, diskSnapshot.resetAt);
-    this.snapshot = { ...diskSnapshot, sessions: mergeOverlappingSessions([...diskSnapshot.sessions, ...retained]) };
-    this.sessionIds = new Set(this.snapshot.sessions.map((session) => session.id));
-    this.loadedMtimeMs = this.currentMtimeMs();
+    store.snapshot = { ...diskSnapshot, sessions: mergeOverlappingSessions([...diskSnapshot.sessions, ...retained]) };
+    store.sessionIds = new Set(store.snapshot.sessions.map((session) => session.id));
+    store.loadedMtimeMs = store.currentMtimeMs();
   }
 
   public async exportData(
@@ -182,11 +201,12 @@ export class DataStore {
     timeframe?: Timeframe,
     now: number = Date.now(),
   ): Promise<string> {
-    this.reloadIfChanged();
-    const sessions = timeframe ? this.getSessionsForTimeframe(timeframe, now) : this.snapshot.sessions;
+    const store = this.currentStore();
+    store.reloadIfChanged();
+    const sessions = timeframe ? store.getSessionsForTimeframe(timeframe, now) : store.snapshot.sessions;
     const output = format === 'csv'
       ? sessionsToCsv(sessions)
-      : JSON.stringify({ ...this.snapshot, sessions }, null, 2);
+      : JSON.stringify({ ...store.snapshot, sessions }, null, 2);
     await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
     const temporaryPath = `${targetPath}.${randomUUID()}.tmp`;
     try {
@@ -204,25 +224,26 @@ export class DataStore {
     dailyGoalMinutes = 120,
     timeframe: Timeframe = 'day',
   ): DashboardSummary {
-    this.reloadIfChanged();
+    const store = this.currentStore();
+    store.reloadIfChanged();
     const range = getTimeframeRange(timeframe, now);
-    const sessions = this.snapshot.sessions
+    const sessions = store.snapshot.sessions
       .filter((session) => session.localDate >= range.startDate && session.localDate <= range.endDate)
       .sort((left, right) => left.start - right.start);
     const totalSeconds = sessions.reduce((sum, session) => sum + session.durationSeconds, 0);
     const todayKey = getLocalDateKey(new Date(now));
     const weekStart = getTimeframeRange('week', now).startDate;
-    const totalSecondsToday = this.getTodaySeconds(now);
-    const totalSecondsThisWeek = this.snapshot.sessions
+    const totalSecondsToday = store.getTodaySeconds(now);
+    const totalSecondsThisWeek = store.snapshot.sessions
       .filter((session) => session.localDate >= weekStart && session.localDate <= todayKey)
-      .reduce((sum, session) => sum + session.durationSeconds, 0) + this.liveSegments(now)
+      .reduce((sum, session) => sum + session.durationSeconds, 0) + store.liveSegments(now)
       .filter((segment) => segment.dateKey >= weekStart && segment.dateKey <= todayKey)
       .reduce((sum, segment) => sum + segment.end - segment.start, 0) / 1000;
 
     const projectBreakdown = aggregate(sessions, (session) => session.project, 8);
     const languageBreakdown = aggregate(sessions, (session) => session.language, 8)
       .map((entry) => ({ language: entry.project, seconds: entry.seconds }));
-    const dates = Array.from(new Set(this.snapshot.sessions.map((session) => session.localDate))).sort();
+    const dates = Array.from(new Set(store.snapshot.sessions.map((session) => session.localDate))).sort();
     const rangeDates = new Set(sessions.map((session) => session.localDate));
     const hourlyActivity = Array.from({ length: 24 }, () => 0);
     for (const session of sessions) {
@@ -263,20 +284,28 @@ export class DataStore {
     };
   }
 
+  public getSnapshot(): CodePulseSnapshot {
+    const store = this.currentStore();
+    store.reloadIfChanged();
+    return store.snapshot;
+  }
+
   public writeCheckpoint(checkpoint: ActiveCheckpoint): void {
+    const store = this.currentStore();
     try {
-      fs.mkdirSync(this.storageDir, { recursive: true });
-      fs.writeFileSync(this.checkpointPath(checkpoint.instanceId), JSON.stringify(checkpoint), 'utf8');
+      fs.mkdirSync(store.storageDir, { recursive: true });
+      fs.writeFileSync(store.checkpointPath(checkpoint.instanceId), JSON.stringify(checkpoint), 'utf8');
     } catch (error) {
-      this.reportError('Unable to write CodePulse tracking checkpoint.', error);
+      store.reportError('Unable to write CodePulse tracking checkpoint.', error);
     }
   }
 
   public clearCheckpoint(instanceId: string): void {
+    const store = this.currentStore();
     try {
-      fs.rmSync(this.checkpointPath(instanceId), { force: true });
+      fs.rmSync(store.checkpointPath(instanceId), { force: true });
     } catch (error) {
-      this.reportError('Unable to clear CodePulse tracking checkpoint.', error);
+      store.reportError('Unable to clear CodePulse tracking checkpoint.', error);
     }
   }
 
@@ -286,19 +315,20 @@ export class DataStore {
     now: number = Date.now(),
     staleMs = 20_000,
   ): number {
+    const store = this.currentStore();
     let names: string[];
     try {
-      names = fs.readdirSync(this.storageDir);
+      names = fs.readdirSync(store.storageDir);
     } catch {
       return 0;
     }
 
     let recovered = 0;
     for (const name of names) {
-      if (!CHECKPOINT_PATTERN.test(name) || name === path.basename(this.checkpointPath(ownInstanceId))) {
+      if (!CHECKPOINT_PATTERN.test(name) || name === path.basename(store.checkpointPath(ownInstanceId))) {
         continue;
       }
-      const checkpointPath = path.join(this.storageDir, name);
+      const checkpointPath = path.join(store.storageDir, name);
       try {
         const checkpoint = JSON.parse(fs.readFileSync(checkpointPath, 'utf8')) as ActiveCheckpoint;
         if (!isValidCheckpoint(checkpoint)) {
@@ -313,8 +343,8 @@ export class DataStore {
           if (durationSeconds < minSessionSeconds) {
             continue;
           }
-          const before = this.snapshot.sessions.length;
-          this.appendSession({
+          const before = store.snapshot.sessions.length;
+          store.appendSession({
             id: sessionIdFor(checkpoint.instanceId, segment.start),
             start: segment.start,
             end: segment.end,
@@ -325,27 +355,34 @@ export class DataStore {
             localHour: segment.hour,
             mode: checkpoint.mode,
           });
-          if (this.snapshot.sessions.length > before) {
+          if (store.snapshot.sessions.length > before) {
             recovered += 1;
           }
         }
         fs.rmSync(checkpointPath, { force: true });
       } catch (error) {
-        this.reportError(`Unable to recover CodePulse checkpoint ${name}.`, error);
+        store.reportError(`Unable to recover CodePulse checkpoint ${name}.`, error);
       }
     }
     return recovered;
   }
 
+  public setLiveInterval(startMs: number | null): void {
+    const store = this.currentStore();
+    store.liveStartMs = startMs;
+  }
+
   private getSessionsForTimeframe(timeframe: Timeframe, now: number): StoredSession[] {
+    const store = this.currentStore();
     const range = getTimeframeRange(timeframe, now);
-    return this.snapshot.sessions.filter(
+    return store.snapshot.sessions.filter(
       (session) => session.localDate >= range.startDate && session.localDate <= range.endDate,
     );
   }
 
   private liveSegments(now: number): ReturnType<typeof splitIntervalAtMidnight> {
-    return this.liveStartMs === null ? [] : splitIntervalAtMidnight(this.liveStartMs, now);
+    const store = this.currentStore();
+    return store.liveStartMs === null ? [] : splitIntervalAtMidnight(store.liveStartMs, now);
   }
 
   private checkpointPath(instanceId: string): string {
@@ -353,29 +390,32 @@ export class DataStore {
   }
 
   private schedulePersist(): void {
-    if (this.flushTimer) return;
-    this.flushTimer = setTimeout(() => {
-      this.flushTimer = undefined;
-      void this.enqueuePersist().catch((error: unknown) => {
-        this.reportError('Unable to persist CodePulse data.', error);
+    const store = this.currentStore();
+    if (store.flushTimer) return;
+    store.flushTimer = setTimeout(() => {
+      store.flushTimer = undefined;
+      void store.enqueuePersist().catch((error: unknown) => {
+        store.reportError('Unable to persist CodePulse data.', error);
       });
     }, WRITE_DEBOUNCE_MS);
   }
 
   private enqueuePersist(reset = false): Promise<void> {
-    this.writeQueue = this.writeQueue.then(() => this.persist(reset), () => this.persist(reset));
-    return this.writeQueue;
+    const store = this.currentStore();
+    store.writeQueue = store.writeQueue.then(() => store.persist(reset), () => store.persist(reset));
+    return store.writeQueue;
   }
 
   private async persist(reset: boolean): Promise<void> {
-    const revisionAtStart = this.revision;
-    const pendingAtStart = new Map(this.pendingSessionVersions);
-    const localSessionsAtStart = this.snapshot.sessions.map((session) => ({ ...session }));
-    const generationAtStart = this.snapshot.generation;
-    const resetAtStart = this.snapshot.resetAt;
-    const releaseLock = await this.acquireFileLock();
+    const store = this.currentStore();
+    const revisionAtStart = store.revision;
+    const pendingAtStart = new Map(store.pendingSessionVersions);
+    const localSessionsAtStart = store.snapshot.sessions.map((session) => ({ ...session }));
+    const generationAtStart = store.snapshot.generation;
+    const resetAtStart = store.snapshot.resetAt;
+    const releaseLock = await store.acquireFileLock();
     try {
-      const diskSnapshot = await this.readDiskSnapshot();
+      const diskSnapshot = await store.readDiskSnapshot();
       let sessions: StoredSession[];
       if (reset) {
         sessions = clipSessionsAfter(localSessionsAtStart, resetAtStart);
@@ -398,18 +438,18 @@ export class DataStore {
         sessions: mergeOverlappingSessions(sessions),
         lastUpdated: Date.now(),
       };
-      await this.writeSnapshotAtomically(saved);
-      if (this.revision !== revisionAtStart && this.snapshot.generation !== generationAtStart) return;
-      const newlyPending = this.snapshot.sessions.filter((session) =>
-        this.pendingSessionVersions.has(session.id) &&
-        this.pendingSessionVersions.get(session.id) !== pendingAtStart.get(session.id));
-      this.snapshot = { ...saved, sessions: mergeOverlappingSessions([...saved.sessions, ...newlyPending]) };
-      this.sessionIds = new Set(this.snapshot.sessions.map((session) => session.id));
+      await store.writeSnapshotAtomically(saved);
+      if (store.revision !== revisionAtStart && store.snapshot.generation !== generationAtStart) return;
+      const newlyPending = store.snapshot.sessions.filter((session) =>
+        store.pendingSessionVersions.has(session.id) &&
+        store.pendingSessionVersions.get(session.id) !== pendingAtStart.get(session.id));
+      store.snapshot = { ...saved, sessions: mergeOverlappingSessions([...saved.sessions, ...newlyPending]) };
+      store.sessionIds = new Set(store.snapshot.sessions.map((session) => session.id));
       for (const [id, version] of pendingAtStart) {
-        if (this.pendingSessionVersions.get(id) === version) this.pendingSessionVersions.delete(id);
+        if (store.pendingSessionVersions.get(id) === version) store.pendingSessionVersions.delete(id);
       }
-      if (this.revision !== revisionAtStart) this.snapshot.lastUpdated = Date.now();
-      this.loadedMtimeMs = this.currentMtimeMs();
+      if (store.revision !== revisionAtStart) store.snapshot.lastUpdated = Date.now();
+      store.loadedMtimeMs = store.currentMtimeMs();
     } finally {
       await releaseLock();
     }
@@ -430,7 +470,14 @@ export class DataStore {
           return createEmptySnapshot();
         }
       }
-      this.reportError('Unable to read the latest CodePulse data before saving.', error);
+      this.reportError('Unable to read the latest CodePulse data before saving; trying backup.', error);
+      try {
+        const backup = JSON.parse(await fs.promises.readFile(`${this.filePath}.bak`, 'utf8')) as unknown;
+        const validated = validateSnapshot(backup);
+        if (validated) return validated;
+      } catch {
+        // Ignore backup failure and keep the empty snapshot.
+      }
       return createEmptySnapshot();
     }
   }
@@ -439,25 +486,37 @@ export class DataStore {
     fs.mkdirSync(this.storageDir, { recursive: true });
     for (const candidate of [this.filePath, `${this.filePath}.bak`]) {
       try {
-        const validated = validateSnapshot(JSON.parse(fs.readFileSync(candidate, 'utf8')) as unknown);
+        const parsed = JSON.parse(fs.readFileSync(candidate, 'utf8')) as unknown;
+        const validated = validateSnapshot(parsed);
         if (validated) return validated;
+        throw new TypeError(`Unsupported schema in ${candidate}.`);
       } catch (error) {
-        if (!isNodeError(error, 'ENOENT')) {
-          this.reportError(`Unable to load CodePulse data from ${candidate}.`, error);
+        if (isNodeError(error, 'ENOENT')) continue;
+        if (candidate === this.filePath) {
+          const corruptPath = `${candidate}.corrupt-${Date.now()}`;
+          try {
+            fs.renameSync(candidate, corruptPath);
+          } catch {
+            // If the file cannot be renamed, proceed with the fallback path.
+          }
+          this.reportError(`Unable to load CodePulse data from ${candidate}; trying backup.`, error);
+          continue;
         }
+        this.reportError(`Unable to load CodePulse data from ${candidate}.`, error);
       }
     }
     return createEmptySnapshot();
   }
 
   private reloadIfChanged(): void {
-    const mtime = this.currentMtimeMs();
-    if (mtime === this.loadedMtimeMs) return;
-    const disk = this.readSnapshot();
-    const pending = this.snapshot.sessions.filter((session) => this.pendingSessionVersions.has(session.id));
-    this.snapshot = { ...disk, sessions: mergeOverlappingSessions([...disk.sessions, ...pending]) };
-    this.sessionIds = new Set(this.snapshot.sessions.map((session) => session.id));
-    this.loadedMtimeMs = this.currentMtimeMs();
+    const store = this.currentStore();
+    const mtime = store.currentMtimeMs();
+    if (mtime === store.loadedMtimeMs) return;
+    const disk = store.readSnapshot();
+    const pending = store.snapshot.sessions.filter((session) => store.pendingSessionVersions.has(session.id));
+    store.snapshot = { ...disk, sessions: mergeOverlappingSessions([...disk.sessions, ...pending]) };
+    store.sessionIds = new Set(store.snapshot.sessions.map((session) => session.id));
+    store.loadedMtimeMs = store.currentMtimeMs();
   }
 
   private currentMtimeMs(): number {
@@ -530,15 +589,17 @@ export class DataStore {
   }
 
   private clearFlushTimer(): void {
-    if (this.flushTimer) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = undefined;
+    const store = this.currentStore();
+    if (store.flushTimer) {
+      clearTimeout(store.flushTimer);
+      store.flushTimer = undefined;
     }
   }
 
   private markPending(id: string): void {
-    this.revision += 1;
-    this.pendingSessionVersions.set(id, this.revision);
+    const store = this.currentStore();
+    store.revision += 1;
+    store.pendingSessionVersions.set(id, store.revision);
   }
 }
 
