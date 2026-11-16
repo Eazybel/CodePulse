@@ -1,10 +1,17 @@
 name: Publish VS Code Extension
 
+# Publishes to the VS Code Marketplace when a version tag such as v1.0.4 is pushed.
+# The tag must match the "version" in package.json. Requires the VSCE_PAT repository
+# secret (an Azure DevOps personal access token with Marketplace "Manage" scope).
+
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   publish:
@@ -17,16 +24,45 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Validate build
-        run: npm run compile
+      - name: Check tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $PKG_VERSION" >&2
+            exit 1
+          fi
 
-      - name: Publish to VS Code Marketplace
-        run: npx @vscode/vsce publish -p "$VSCE_PAT"
+      - name: Compile and run tests
+        run: npm test
+
+      - name: Check publishing token is configured
+        run: |
+          if [ -z "$VSCE_PAT" ]; then
+            echo "The VSCE_PAT repository secret is not set." >&2
+            exit 1
+          fi
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: Package extension
+        run: npx @vscode/vsce package --out ./codepulse-tracker.vsix
+
+      - name: Publish to VS Code Marketplace
+        run: npx @vscode/vsce publish --packagePath ./codepulse-tracker.vsix -p "$VSCE_PAT"
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: Upload VSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: codepulse-tracker-vsix
+          path: codepulse-tracker.vsix
+          if-no-files-found: error
