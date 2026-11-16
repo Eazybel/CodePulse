@@ -78,9 +78,9 @@ export class DataStore {
       .filter((session) => session.localDate === todayKey)
       .reduce((sum, session) => sum + session.durationSeconds, 0);
 
-    const totalSecondsThisWeek = sessions
-      .filter((session) => session.start >= startOfWeek.getTime())
-      .reduce((sum, session) => sum + session.durationSeconds, 0);
+    const weekSessions = sessions.filter((session) => session.start >= startOfWeek.getTime());
+    const totalSecondsThisWeek = weekSessions.reduce((sum, session) => sum + session.durationSeconds, 0);
+    const activeDaysThisWeek = new Set(weekSessions.map((session) => session.localDate)).size;
 
     const uniqueDates = new Set(sessions.map((session) => session.localDate));
     const recentSessions = sessions.slice(-8).reverse();
@@ -103,7 +103,8 @@ export class DataStore {
       activeDays: uniqueDates.size,
       recentSessions,
       projectBreakdown,
-      averageDailySeconds: uniqueDates.size === 0 ? 0 : Math.round(totalSecondsThisWeek / uniqueDates.size),
+      // Weekly total over the days active this week, not over all-time active days.
+      averageDailySeconds: activeDaysThisWeek === 0 ? 0 : Math.round(totalSecondsThisWeek / activeDaysThisWeek),
     };
   }
 

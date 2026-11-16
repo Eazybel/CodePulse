@@ -65,10 +65,12 @@ export class CodePulseTracker implements vscode.Disposable {
 
   private tick(): void {
     const enabled = vscode.workspace.getConfiguration('codepulse').get<boolean>('enabled', true);
+    // The lease is only renewed while this window is actually tracking. Renewing it
+    // unconditionally made every window look "owned" by another one, so with two
+    // windows open neither of them tracked anything.
     if (!enabled) {
       this.closeActiveInterval();
       this.updateStatusBar();
-      this.writeLease();
       return;
     }
 
@@ -82,7 +84,9 @@ export class CodePulseTracker implements vscode.Disposable {
     }
 
     this.updateStatusBar();
-    this.writeLease();
+    if (shouldTrack) {
+      this.writeLease();
+    }
   }
 
   private updateStatusBar(): void {
@@ -179,8 +183,12 @@ export class CodePulseTracker implements vscode.Disposable {
       workspaceName: vscode.workspace.name ?? 'unnamed-workspace',
     };
 
-    fs.mkdirSync(path.dirname(this.leasePath), { recursive: true });
-    fs.writeFileSync(this.leasePath, JSON.stringify(lease, null, 2), 'utf8');
+    try {
+      fs.mkdirSync(path.dirname(this.leasePath), { recursive: true });
+      fs.writeFileSync(this.leasePath, JSON.stringify(lease, null, 2), 'utf8');
+    } catch {
+      // A failed lease write must not throw out of the 1s timer callback.
+    }
   }
 
   private readLease(): LeaseState | undefined {
