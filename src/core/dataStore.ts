@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { getLocalDateKey, getTimeframeRange, Timeframe, TrackingMode } from './timeUtils';
+import { getLocalDateKey, getTimeframeRange, splitIntervalAtMidnight, Timeframe, TrackingMode } from './timeUtils';
 
 export interface StoredSession {
   id: string;
@@ -47,9 +47,24 @@ export interface CodePulseSnapshot {
   lastUpdated: number;
 }
 
+/** A periodic record used to recover work after an abrupt VS Code shutdown. */
+export interface ActiveCheckpoint {
+  instanceId: string;
+  start: number;
+  lastSeen: number;
+  project: string;
+  language: string;
+  mode: TrackingMode;
+}
+
+const CHECKPOINT_PATTERN = /^codepulse-active-[0-9a-f-]+\.json$/i;
+const WRITE_DEBOUNCE_MS = 1_500;
 const LOCK_TIMEOUT_MS = 15_000;
 const LOCK_STALE_MS = 30_000;
-const WRITE_DEBOUNCE_MS = 1_500;
+
+export function sessionIdFor(instanceId: string, segmentStart: number): string {
+  return `${instanceId}-${segmentStart}`;
+}
 
 export class DataStore {
   private readonly storageDir: string;
@@ -62,16 +77,20 @@ export class DataStore {
   private revision = 0;
   private writeQueue: Promise<void> = Promise.resolve();
   private flushTimer: NodeJS.Timeout | undefined;
+  private loadedMtimeMs = 0;
+  private liveStartMs: number | null = null;
 
   public constructor(
     storageDir: string,
     reportError: (message: string, error: unknown) => void = (message, error) => console.error(message, error),
   ) {
+    this.storageDir = storageDir;
     this.filePath = path.join(storageDir, 'codepulse-state.json');
     this.lockPath = `${this.filePath}.lock`;
     this.reportError = reportError;
     this.snapshot = this.readSnapshot();
     this.sessionIds = new Set(this.snapshot.sessions.map((session) => session.id));
+    this.loadedMtimeMs = this.currentMtimeMs();
   }
 
   public getSnapshot(): CodePulseSnapshot {
@@ -79,41 +98,30 @@ export class DataStore {
     return this.snapshot;
   }
 
-  public async refreshFromDisk(): Promise<void> {
-    const revisionAtStart = this.revision;
-    const generationAtStart = this.snapshot.generation;
-    const diskSnapshot = await this.readDiskSnapshot();
-    if (this.revision !== revisionAtStart && this.snapshot.generation !== generationAtStart) {
-      return;
-    }
+  /** Includes an unsaved live interval in daily totals and dashboard statistics. */
+  public setLiveInterval(startMs: number | null): void {
+    this.liveStartMs = startMs;
+  }
 
-    const generationChanged = diskSnapshot.generation !== generationAtStart;
-    const localPendingSessions = this.snapshot.sessions.filter((session) => this.pendingSessionVersions.has(session.id));
-    const recentLocalSessions = !generationChanged
-      ? localPendingSessions
-      : clipSessionsAfter(localPendingSessions, diskSnapshot.resetAt);
-
-    this.snapshot = {
-      ...diskSnapshot,
-      sessions: mergeOverlappingSessions([...diskSnapshot.sessions, ...recentLocalSessions]),
-    };
-    this.sessionIds = new Set(this.snapshot.sessions.map((session) => session.id));
-    if (generationChanged) {
-      const retainedIds = new Set(recentLocalSessions.map((session) => session.id));
-      for (const id of this.pendingSessionVersions.keys()) {
-        if (!retainedIds.has(id)) {
-          this.pendingSessionVersions.delete(id);
-        }
-      }
-    }
+  public getTodaySeconds(now: number = Date.now()): number {
+    this.reloadIfChanged();
+    const today = getLocalDateKey(new Date(now));
+    const saved = this.snapshot.sessions
+      .filter((session) => session.localDate === today)
+      .reduce((sum, session) => sum + session.durationSeconds, 0);
+    const liveMs = this.liveSegments(now)
+      .filter((segment) => segment.dateKey === today)
+      .reduce((sum, segment) => sum + segment.end - segment.start, 0);
+    return saved + Math.round(liveMs / 1000);
   }
 
   public appendSession(session: StoredSession): void {
     if (!isValidSession(session)) {
       throw new TypeError('Cannot append an invalid CodePulse session.');
     }
+    this.reloadIfChanged();
     if (this.sessionIds.has(session.id)) {
-      throw new TypeError(`CodePulse session id "${session.id}" already exists.`);
+      return;
     }
 
     const sessions = this.snapshot.sessions;
@@ -124,10 +132,10 @@ export class DataStore {
       this.markPending(previous.id);
     } else {
       sessions.push({ ...session });
+      sessions.sort((left, right) => left.start - right.start);
       this.sessionIds.add(session.id);
       this.markPending(session.id);
     }
-
     this.snapshot.lastUpdated = Date.now();
     this.schedulePersist();
   }
@@ -152,16 +160,34 @@ export class DataStore {
     await this.enqueuePersist();
   }
 
+  public async refreshFromDisk(): Promise<void> {
+    const revisionAtStart = this.revision;
+    const generationAtStart = this.snapshot.generation;
+    const diskSnapshot = await this.readDiskSnapshot();
+    if (this.revision !== revisionAtStart && this.snapshot.generation !== generationAtStart) {
+      return;
+    }
+    const localPending = this.snapshot.sessions.filter((session) => this.pendingSessionVersions.has(session.id));
+    const retained = diskSnapshot.generation === generationAtStart
+      ? localPending
+      : clipSessionsAfter(localPending, diskSnapshot.resetAt);
+    this.snapshot = { ...diskSnapshot, sessions: mergeOverlappingSessions([...diskSnapshot.sessions, ...retained]) };
+    this.sessionIds = new Set(this.snapshot.sessions.map((session) => session.id));
+    this.loadedMtimeMs = this.currentMtimeMs();
+  }
+
   public async exportData(
     targetPath: string,
     format: 'json' | 'csv' = 'json',
     timeframe?: Timeframe,
     now: number = Date.now(),
   ): Promise<string> {
+    this.reloadIfChanged();
     const sessions = timeframe ? this.getSessionsForTimeframe(timeframe, now) : this.snapshot.sessions;
-    const output = format === 'csv' ? sessionsToCsv(sessions) : JSON.stringify({ ...this.snapshot, sessions }, null, 2);
+    const output = format === 'csv'
+      ? sessionsToCsv(sessions)
+      : JSON.stringify({ ...this.snapshot, sessions }, null, 2);
     await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
-
     const temporaryPath = `${targetPath}.${randomUUID()}.tmp`;
     try {
       await fs.promises.writeFile(temporaryPath, output, { encoding: 'utf8', flag: 'wx' });
@@ -175,22 +201,23 @@ export class DataStore {
 
   public getDashboardSummary(
     now: number = Date.now(),
-    dailyGoalMinutes: number = 120,
+    dailyGoalMinutes = 120,
     timeframe: Timeframe = 'day',
   ): DashboardSummary {
+    this.reloadIfChanged();
     const range = getTimeframeRange(timeframe, now);
     const sessions = this.snapshot.sessions
       .filter((session) => session.localDate >= range.startDate && session.localDate <= range.endDate)
       .sort((left, right) => left.start - right.start);
     const totalSeconds = sessions.reduce((sum, session) => sum + session.durationSeconds, 0);
     const todayKey = getLocalDateKey(new Date(now));
-    const totalSecondsToday = this.snapshot.sessions
-      .filter((session) => session.localDate === todayKey)
-      .reduce((sum, session) => sum + session.durationSeconds, 0);
     const weekStart = getTimeframeRange('week', now).startDate;
+    const totalSecondsToday = this.getTodaySeconds(now);
     const totalSecondsThisWeek = this.snapshot.sessions
       .filter((session) => session.localDate >= weekStart && session.localDate <= todayKey)
-      .reduce((sum, session) => sum + session.durationSeconds, 0);
+      .reduce((sum, session) => sum + session.durationSeconds, 0) + this.liveSegments(now)
+      .filter((segment) => segment.dateKey >= weekStart && segment.dateKey <= todayKey)
+      .reduce((sum, segment) => sum + segment.end - segment.start, 0) / 1000;
 
     const projectBreakdown = aggregate(sessions, (session) => session.project, 8);
     const languageBreakdown = aggregate(sessions, (session) => session.language, 8)
@@ -201,15 +228,13 @@ export class DataStore {
     for (const session of sessions) {
       hourlyActivity[session.localHour] += session.durationSeconds;
     }
-
     const peakSeconds = Math.max(...hourlyActivity);
     const earliest = sessions.length > 0 ? Math.max(range.start, sessions[0].start) : now;
-    const lastSessionEnd = sessions.reduce((latestEnd, session) => Math.max(latestEnd, session.end), -Infinity);
-    const latest = sessions.length > 0 ? Math.min(now, lastSessionEnd) : now;
+    const lastEnd = sessions.reduce((latest, session) => Math.max(latest, session.end), -Infinity);
+    const latest = sessions.length > 0 ? Math.min(now, lastEnd) : now;
     const observedSeconds = Math.max(0, Math.round((latest - earliest) / 1000));
     const activeSeconds = Math.min(totalSeconds, observedSeconds);
     const activeRatioPercent = observedSeconds === 0 ? 0 : Math.round((activeSeconds / observedSeconds) * 100);
-    const currentStreak = getCurrentStreak(dates, todayKey);
     const dailyGoalSeconds = Math.max(0, Math.round(dailyGoalMinutes * 60));
 
     return {
@@ -217,7 +242,7 @@ export class DataStore {
       rangeStart: range.startDate,
       rangeEnd: range.endDate,
       totalSecondsToday,
-      totalSecondsThisWeek,
+      totalSecondsThisWeek: Math.round(totalSecondsThisWeek),
       totalSeconds,
       totalSessions: sessions.length,
       activeDays: rangeDates.size,
@@ -229,13 +254,87 @@ export class DataStore {
       goalProgressPercent: dailyGoalSeconds === 0
         ? 0
         : Math.min(100, Math.round((totalSecondsToday / dailyGoalSeconds) * 100)),
-      currentStreak,
+      currentStreak: getCurrentStreak(dates, todayKey),
       longestStreak: getLongestStreak(dates),
       peakCodingHour: peakSeconds === 0 ? null : hourlyActivity.indexOf(peakSeconds),
       hourlyActivity,
       activeRatioPercent,
       idleRatioPercent: 100 - activeRatioPercent,
     };
+  }
+
+  public writeCheckpoint(checkpoint: ActiveCheckpoint): void {
+    try {
+      fs.mkdirSync(this.storageDir, { recursive: true });
+      fs.writeFileSync(this.checkpointPath(checkpoint.instanceId), JSON.stringify(checkpoint), 'utf8');
+    } catch (error) {
+      this.reportError('Unable to write CodePulse tracking checkpoint.', error);
+    }
+  }
+
+  public clearCheckpoint(instanceId: string): void {
+    try {
+      fs.rmSync(this.checkpointPath(instanceId), { force: true });
+    } catch (error) {
+      this.reportError('Unable to clear CodePulse tracking checkpoint.', error);
+    }
+  }
+
+  public recoverStaleCheckpoints(
+    ownInstanceId: string,
+    minSessionSeconds: number,
+    now: number = Date.now(),
+    staleMs = 20_000,
+  ): number {
+    let names: string[];
+    try {
+      names = fs.readdirSync(this.storageDir);
+    } catch {
+      return 0;
+    }
+
+    let recovered = 0;
+    for (const name of names) {
+      if (!CHECKPOINT_PATTERN.test(name) || name === path.basename(this.checkpointPath(ownInstanceId))) {
+        continue;
+      }
+      const checkpointPath = path.join(this.storageDir, name);
+      try {
+        const checkpoint = JSON.parse(fs.readFileSync(checkpointPath, 'utf8')) as ActiveCheckpoint;
+        if (!isValidCheckpoint(checkpoint)) {
+          fs.rmSync(checkpointPath, { force: true });
+          continue;
+        }
+        if (now - checkpoint.lastSeen <= staleMs) {
+          continue;
+        }
+        for (const segment of splitIntervalAtMidnight(checkpoint.start, checkpoint.lastSeen)) {
+          const durationSeconds = Math.round((segment.end - segment.start) / 1000);
+          if (durationSeconds < minSessionSeconds) {
+            continue;
+          }
+          const before = this.snapshot.sessions.length;
+          this.appendSession({
+            id: sessionIdFor(checkpoint.instanceId, segment.start),
+            start: segment.start,
+            end: segment.end,
+            durationSeconds,
+            project: checkpoint.project,
+            language: checkpoint.language,
+            localDate: segment.dateKey,
+            localHour: segment.hour,
+            mode: checkpoint.mode,
+          });
+          if (this.snapshot.sessions.length > before) {
+            recovered += 1;
+          }
+        }
+        fs.rmSync(checkpointPath, { force: true });
+      } catch (error) {
+        this.reportError(`Unable to recover CodePulse checkpoint ${name}.`, error);
+      }
+    }
+    return recovered;
   }
 
   private getSessionsForTimeframe(timeframe: Timeframe, now: number): StoredSession[] {
@@ -245,41 +344,16 @@ export class DataStore {
     );
   }
 
-  private readSnapshot(): CodePulseSnapshot {
-    const fallback = createEmptySnapshot();
-    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+  private liveSegments(now: number): ReturnType<typeof splitIntervalAtMidnight> {
+    return this.liveStartMs === null ? [] : splitIntervalAtMidnight(this.liveStartMs, now);
+  }
 
-    for (const candidate of [this.filePath, `${this.filePath}.bak`]) {
-      if (!fs.existsSync(candidate)) {
-        continue;
-      }
-
-      try {
-        const parsed: unknown = JSON.parse(fs.readFileSync(candidate, 'utf8'));
-        const validated = validateSnapshot(parsed);
-        if (!validated) {
-          throw new TypeError('The saved CodePulse data does not match the supported schema.');
-        }
-        if (candidate !== this.filePath) {
-          this.reportError('Recovered CodePulse data from its backup file.', new Error(candidate));
-        }
-        return validated;
-      } catch (error) {
-        this.reportError(`Unable to load CodePulse data from ${candidate}.`, error);
-        if (candidate === this.filePath) {
-          this.backupBrokenFile();
-        }
-      }
-    }
-
-    return fallback;
+  private checkpointPath(instanceId: string): string {
+    return path.join(this.storageDir, `codepulse-active-${instanceId}.json`);
   }
 
   private schedulePersist(): void {
-    if (this.flushTimer) {
-      return;
-    }
-
+    if (this.flushTimer) return;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = undefined;
       void this.enqueuePersist().catch((error: unknown) => {
@@ -289,10 +363,7 @@ export class DataStore {
   }
 
   private enqueuePersist(reset = false): Promise<void> {
-    this.writeQueue = this.writeQueue.then(
-      () => this.persist(reset),
-      () => this.persist(reset),
-    );
+    this.writeQueue = this.writeQueue.then(() => this.persist(reset), () => this.persist(reset));
     return this.writeQueue;
   }
 
@@ -309,54 +380,36 @@ export class DataStore {
       if (reset) {
         sessions = clipSessionsAfter(localSessionsAtStart, resetAtStart);
       } else if (diskSnapshot.generation !== generationAtStart) {
-        sessions = diskSnapshot.sessions.concat(
-          clipSessionsAfter(
-            localSessionsAtStart.filter((session) => pendingAtStart.has(session.id)),
-            diskSnapshot.resetAt,
-          ),
-        );
+        sessions = diskSnapshot.sessions.concat(clipSessionsAfter(
+          localSessionsAtStart.filter((session) => pendingAtStart.has(session.id)),
+          diskSnapshot.resetAt,
+        ));
       } else {
         const byId = new Map(diskSnapshot.sessions.map((session) => [session.id, session]));
         for (const session of localSessionsAtStart) {
-          if (pendingAtStart.has(session.id)) {
-            byId.set(session.id, session);
-          }
+          if (pendingAtStart.has(session.id)) byId.set(session.id, session);
         }
         sessions = Array.from(byId.values());
       }
-
-      const snapshotToWrite: CodePulseSnapshot = {
+      const saved: CodePulseSnapshot = {
         version: 2,
         generation: reset ? generationAtStart : diskSnapshot.generation,
         resetAt: reset ? resetAtStart : diskSnapshot.resetAt,
         sessions: mergeOverlappingSessions(sessions),
         lastUpdated: Date.now(),
       };
-      await this.writeSnapshotAtomically(snapshotToWrite);
-
-      if (this.revision !== revisionAtStart && this.snapshot.generation !== generationAtStart) {
-        return;
-      }
-
-      const newPendingSessions = this.snapshot.sessions.filter(
-        (session) => this.pendingSessionVersions.has(session.id) &&
-          this.pendingSessionVersions.get(session.id) !== pendingAtStart.get(session.id),
-      );
-      this.snapshot = {
-        ...snapshotToWrite,
-        generation: snapshotToWrite.generation,
-        resetAt: snapshotToWrite.resetAt,
-        sessions: mergeOverlappingSessions([...snapshotToWrite.sessions, ...newPendingSessions]),
-      };
+      await this.writeSnapshotAtomically(saved);
+      if (this.revision !== revisionAtStart && this.snapshot.generation !== generationAtStart) return;
+      const newlyPending = this.snapshot.sessions.filter((session) =>
+        this.pendingSessionVersions.has(session.id) &&
+        this.pendingSessionVersions.get(session.id) !== pendingAtStart.get(session.id));
+      this.snapshot = { ...saved, sessions: mergeOverlappingSessions([...saved.sessions, ...newlyPending]) };
       this.sessionIds = new Set(this.snapshot.sessions.map((session) => session.id));
       for (const [id, version] of pendingAtStart) {
-        if (this.pendingSessionVersions.get(id) === version) {
-          this.pendingSessionVersions.delete(id);
-        }
+        if (this.pendingSessionVersions.get(id) === version) this.pendingSessionVersions.delete(id);
       }
-      if (this.revision !== revisionAtStart) {
-        this.snapshot.lastUpdated = Date.now();
-      }
+      if (this.revision !== revisionAtStart) this.snapshot.lastUpdated = Date.now();
+      this.loadedMtimeMs = this.currentMtimeMs();
     } finally {
       await releaseLock();
     }
@@ -364,70 +417,72 @@ export class DataStore {
 
   private async readDiskSnapshot(): Promise<CodePulseSnapshot> {
     try {
-      const content = await fs.promises.readFile(this.filePath, 'utf8');
-      const validated = validateSnapshot(JSON.parse(content) as unknown);
-      if (validated) {
-        return validated;
-      }
-      throw new TypeError('The latest CodePulse data file does not match the supported schema.');
+      const parsed: unknown = JSON.parse(await fs.promises.readFile(this.filePath, 'utf8'));
+      const validated = validateSnapshot(parsed);
+      if (!validated) throw new TypeError('The latest CodePulse data file does not match the supported schema.');
+      return validated;
     } catch (error) {
       if (isNodeError(error, 'ENOENT')) {
-        const backupContent = await fs.promises.readFile(`${this.filePath}.bak`, 'utf8').catch((backupError: unknown) => {
-          if (isNodeError(backupError, 'ENOENT')) {
-            return undefined;
-          }
-          throw backupError;
-        });
-        if (!backupContent) {
+        try {
+          const backup = JSON.parse(await fs.promises.readFile(`${this.filePath}.bak`, 'utf8')) as unknown;
+          return validateSnapshot(backup) ?? createEmptySnapshot();
+        } catch {
           return createEmptySnapshot();
         }
-        const backupSnapshot = validateSnapshot(JSON.parse(backupContent) as unknown);
-        if (!backupSnapshot) {
-          throw new TypeError('The CodePulse backup does not match the supported schema.');
-        }
-        this.reportError('Recovered CodePulse data from its backup file.', new Error(`${this.filePath}.bak`));
-        return backupSnapshot;
       }
-
       this.reportError('Unable to read the latest CodePulse data before saving.', error);
-      const content = await fs.promises.readFile(`${this.filePath}.bak`, 'utf8').catch((backupError: unknown) => {
-        if (isNodeError(backupError, 'ENOENT')) {
-          return undefined;
-        }
-        throw backupError;
-      });
-      if (!content) {
-        return createEmptySnapshot();
-      }
+      return createEmptySnapshot();
+    }
+  }
 
-      const validated = validateSnapshot(JSON.parse(content) as unknown);
-      if (validated) {
-        return validated;
+  private readSnapshot(): CodePulseSnapshot {
+    fs.mkdirSync(this.storageDir, { recursive: true });
+    for (const candidate of [this.filePath, `${this.filePath}.bak`]) {
+      try {
+        const validated = validateSnapshot(JSON.parse(fs.readFileSync(candidate, 'utf8')) as unknown);
+        if (validated) return validated;
+      } catch (error) {
+        if (!isNodeError(error, 'ENOENT')) {
+          this.reportError(`Unable to load CodePulse data from ${candidate}.`, error);
+        }
       }
-      throw new TypeError('The CodePulse backup does not match the supported schema.');
+    }
+    return createEmptySnapshot();
+  }
+
+  private reloadIfChanged(): void {
+    const mtime = this.currentMtimeMs();
+    if (mtime === this.loadedMtimeMs) return;
+    const disk = this.readSnapshot();
+    const pending = this.snapshot.sessions.filter((session) => this.pendingSessionVersions.has(session.id));
+    this.snapshot = { ...disk, sessions: mergeOverlappingSessions([...disk.sessions, ...pending]) };
+    this.sessionIds = new Set(this.snapshot.sessions.map((session) => session.id));
+    this.loadedMtimeMs = this.currentMtimeMs();
+  }
+
+  private currentMtimeMs(): number {
+    try {
+      return fs.statSync(this.filePath).mtimeMs;
+    } catch {
+      return 0;
     }
   }
 
   private async writeSnapshotAtomically(snapshot: CodePulseSnapshot): Promise<void> {
     const temporaryPath = `${this.filePath}.${randomUUID()}.tmp`;
-    const content = JSON.stringify(snapshot, null, 2);
     try {
       const handle = await fs.promises.open(temporaryPath, 'wx');
       try {
-        await handle.writeFile(content, 'utf8');
+        await handle.writeFile(JSON.stringify(snapshot, null, 2), 'utf8');
         await handle.sync();
       } finally {
         await handle.close();
       }
       try {
-        const existing = await fs.promises.readFile(this.filePath, 'utf8');
-        if (validateSnapshot(JSON.parse(existing) as unknown)) {
-          await fs.promises.copyFile(this.filePath, `${this.filePath}.bak`);
-        }
+        const existing = JSON.parse(await fs.promises.readFile(this.filePath, 'utf8')) as unknown;
+        if (validateSnapshot(existing)) await fs.promises.copyFile(this.filePath, `${this.filePath}.bak`);
       } catch (error) {
-        if (!isNodeError(error, 'ENOENT') && !(error instanceof SyntaxError)) {
-          throw error;
-        }
+        if (!isNodeError(error, 'ENOENT') && !(error instanceof SyntaxError)) throw error;
       }
       await fs.promises.rename(temporaryPath, this.filePath);
     } catch (error) {
@@ -437,7 +492,7 @@ export class DataStore {
   }
 
   private async acquireFileLock(): Promise<() => Promise<void>> {
-    await fs.promises.mkdir(path.dirname(this.filePath), { recursive: true });
+    await fs.promises.mkdir(this.storageDir, { recursive: true });
     const startedAt = Date.now();
     while (Date.now() - startedAt < LOCK_TIMEOUT_MS) {
       try {
@@ -446,47 +501,31 @@ export class DataStore {
         return async () => {
           await handle.close();
           await fs.promises.unlink(this.lockPath).catch((error: unknown) => {
-            if (!isNodeError(error, 'ENOENT')) {
-              throw error;
-            }
+            if (!isNodeError(error, 'ENOENT')) throw error;
           });
         };
       } catch (error) {
-        if (!isNodeError(error, 'EEXIST')) {
-          throw error;
-        }
+        if (!isNodeError(error, 'EEXIST')) throw error;
       }
-
-      const lockStat = await fs.promises.stat(this.lockPath).catch((error: unknown) => {
-        if (isNodeError(error, 'ENOENT')) {
-          return undefined;
-        }
+      const stat = await fs.promises.stat(this.lockPath).catch((error: unknown) => {
+        if (isNodeError(error, 'ENOENT')) return undefined;
         throw error;
       });
-      if (lockStat && Date.now() - lockStat.mtimeMs > LOCK_STALE_MS) {
+      if (stat && Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
         await delay(100);
-        const currentStat = await fs.promises.stat(this.lockPath).catch((error: unknown) => {
-          if (isNodeError(error, 'ENOENT')) {
-            return undefined;
-          }
+        const current = await fs.promises.stat(this.lockPath).catch((error: unknown) => {
+          if (isNodeError(error, 'ENOENT')) return undefined;
           throw error;
         });
-        if (
-          currentStat &&
-          currentStat.ino === lockStat.ino &&
-          currentStat.mtimeMs === lockStat.mtimeMs &&
-          Date.now() - currentStat.mtimeMs > LOCK_STALE_MS
-        ) {
+        if (current && current.ino === stat.ino && current.mtimeMs === stat.mtimeMs &&
+          Date.now() - current.mtimeMs > LOCK_STALE_MS) {
           await fs.promises.unlink(this.lockPath).catch((error: unknown) => {
-            if (!isNodeError(error, 'ENOENT')) {
-              throw error;
-            }
+            if (!isNodeError(error, 'ENOENT')) throw error;
           });
         }
       }
       await delay(50);
     }
-
     throw new Error('Timed out waiting for the CodePulse data file lock.');
   }
 
@@ -501,101 +540,43 @@ export class DataStore {
     this.revision += 1;
     this.pendingSessionVersions.set(id, this.revision);
   }
-
-  private backupBrokenFile(): void {
-    if (!fs.existsSync(this.filePath)) {
-      return;
-    }
-
-    try {
-      fs.copyFileSync(this.filePath, `${this.filePath}.corrupt-${Date.now()}.bak`);
-    } catch (error) {
-      this.reportError('Unable to back up the damaged CodePulse data file.', error);
-    }
-  }
 }
 
 function createEmptySnapshot(): CodePulseSnapshot {
-  return {
-    version: 2,
-    generation: 'initial',
-    resetAt: 0,
-    sessions: [],
-    lastUpdated: Date.now(),
-  };
+  return { version: 2, generation: 'initial', resetAt: 0, sessions: [], lastUpdated: Date.now() };
 }
 
 function validateSnapshot(value: unknown): CodePulseSnapshot | undefined {
-  if (
-    !isRecord(value) ||
-    (value.version !== 1 && value.version !== 2) ||
-    !Array.isArray(value.sessions)
-  ) {
+  if (!isRecord(value) || (value.version !== 1 && value.version !== 2) || !Array.isArray(value.sessions)) {
     return undefined;
   }
-
   const sessions = value.sessions.filter(isValidSession);
-  if (
-    sessions.length !== value.sessions.length ||
-    new Set(sessions.map((session) => session.id)).size !== sessions.length
-  ) {
+  if (sessions.length !== value.sessions.length || new Set(sessions.map((session) => session.id)).size !== sessions.length) {
     return undefined;
   }
-
-  const generation = typeof value.generation === 'string' ? value.generation : 'initial';
-  const resetAt = isFiniteNumber(value.resetAt) ? value.resetAt : 0;
-  const lastUpdated = isFiniteNumber(value.lastUpdated) ? value.lastUpdated : Date.now();
-
   return {
     version: 2,
-    generation,
-    resetAt,
+    generation: typeof value.generation === 'string' ? value.generation : 'initial',
+    resetAt: isFiniteNumber(value.resetAt) ? value.resetAt : 0,
     sessions: mergeOverlappingSessions(sessions),
-    lastUpdated,
+    lastUpdated: isFiniteNumber(value.lastUpdated) ? value.lastUpdated : Date.now(),
   };
 }
 
 function isValidSession(value: unknown): value is StoredSession {
-  if (!isRecord(value)) {
-    return false;
-  }
-  return typeof value.id === 'string' &&
-    value.id.length > 0 &&
-    value.id.length <= 256 &&
-    isFiniteNumber(value.start) &&
-    Math.abs(value.start) <= 8_640_000_000_000_000 &&
-    isFiniteNumber(value.end) &&
-    Math.abs(value.end) <= 8_640_000_000_000_000 &&
-    value.end > value.start &&
-    isFiniteNumber(value.durationSeconds) &&
-    Number.isInteger(value.durationSeconds) &&
-    value.durationSeconds > 0 &&
-    Math.abs(value.durationSeconds - (value.end - value.start) / 1000) <= 1 &&
-    typeof value.project === 'string' &&
-    value.project.length <= 512 &&
-    typeof value.language === 'string' &&
-    value.language.length <= 512 &&
-    typeof value.localDate === 'string' &&
-    isValidDateKey(value.localDate) &&
-    isFiniteNumber(value.localHour) &&
-    Number.isInteger(value.localHour) &&
-    value.localHour >= 0 &&
-    value.localHour <= 23 &&
+  return isRecord(value) && typeof value.id === 'string' && value.id.length > 0 && value.id.length <= 256 &&
+    isFiniteNumber(value.start) && isFiniteNumber(value.end) && value.end > value.start &&
+    isFiniteNumber(value.durationSeconds) && value.durationSeconds > 0 &&
+    typeof value.project === 'string' && typeof value.language === 'string' &&
+    typeof value.localDate === 'string' && isFiniteNumber(value.localHour) &&
+    Number.isInteger(value.localHour) && value.localHour >= 0 && value.localHour <= 23 &&
     (value.mode === 'alwaysOpen' || value.mode === 'windowFocused');
 }
 
-function isValidDateKey(value: string): boolean {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-  if (!match) {
-    return false;
-  }
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const parsed = new Date(Date.UTC(year, month - 1, day));
-  return parsed.getUTCFullYear() === year &&
-    parsed.getUTCMonth() === month - 1 &&
-    parsed.getUTCDate() === day;
+function isValidCheckpoint(value: unknown): value is ActiveCheckpoint {
+  return isRecord(value) && typeof value.instanceId === 'string' && isFiniteNumber(value.start) &&
+    isFiniteNumber(value.lastSeen) && typeof value.project === 'string' && typeof value.language === 'string' &&
+    (value.mode === 'alwaysOpen' || value.mode === 'windowFocused');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -611,55 +592,40 @@ function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoExcepti
 }
 
 function canMergeSessions(left: StoredSession, right: StoredSession): boolean {
-  return left.project === right.project &&
-    left.language === right.language &&
-    left.localDate === right.localDate &&
-    left.localHour === right.localHour &&
-    left.mode === right.mode &&
-    right.start <= left.end + 1_500 &&
-    right.end >= left.end;
+  return left.project === right.project && left.language === right.language && left.localDate === right.localDate &&
+    left.localHour === right.localHour && left.mode === right.mode && right.start <= left.end + 1_500 && right.end >= left.end;
 }
 
 function mergeOverlappingSessions(sessions: StoredSession[]): StoredSession[] {
-  const ordered = [...sessions].sort((left, right) => left.start - right.start || left.id.localeCompare(right.id));
+  const ordered = [...sessions].sort((a, b) => a.start - b.start || a.id.localeCompare(b.id));
   const merged: StoredSession[] = [];
-  let coverageEnd = -Infinity;
-
-  for (const current of ordered) {
-    if (current.start < coverageEnd) {
-      current.start = coverageEnd;
-      if (current.end <= current.start) {
-        continue;
-      }
-      const startDate = new Date(current.start);
+  let coveredUntil = -Infinity;
+  for (const source of ordered) {
+    const current = { ...source };
+    if (current.start < coveredUntil) {
+      current.start = coveredUntil;
+      if (current.end <= current.start) continue;
       current.durationSeconds = (current.end - current.start) / 1000;
-      if (current.durationSeconds <= 0) {
-        continue;
-      }
-      current.localDate = getLocalDateKey(startDate);
-      current.localHour = startDate.getHours();
+      const date = new Date(current.start);
+      current.localDate = getLocalDateKey(date);
+      current.localHour = date.getHours();
     }
-
     const previous = merged[merged.length - 1];
     if (previous && canMergeSessions(previous, current)) {
       previous.end = Math.max(previous.end, current.end);
       previous.durationSeconds = (previous.end - previous.start) / 1000;
-      coverageEnd = Math.max(coverageEnd, previous.end);
+      coveredUntil = Math.max(coveredUntil, previous.end);
     } else {
-      merged.push({ ...current });
-      coverageEnd = Math.max(coverageEnd, current.end);
+      merged.push(current);
+      coveredUntil = Math.max(coveredUntil, current.end);
     }
   }
-
   return merged;
 }
 
 function clipSessionsAfter(sessions: StoredSession[], cutoff: number): StoredSession[] {
-  const clipped: StoredSession[] = [];
-  for (const source of sessions) {
-    if (source.end <= cutoff) {
-      continue;
-    }
+  return sessions.flatMap((source) => {
+    if (source.end <= cutoff) return [];
     const session = { ...source };
     if (session.start < cutoff) {
       session.start = cutoff;
@@ -668,11 +634,8 @@ function clipSessionsAfter(sessions: StoredSession[], cutoff: number): StoredSes
       session.localHour = date.getHours();
       session.durationSeconds = (session.end - session.start) / 1000;
     }
-    if (session.durationSeconds > 0) {
-      clipped.push(session);
-    }
-  }
-  return clipped;
+    return session.durationSeconds > 0 ? [session] : [];
+  });
 }
 
 function aggregate(
@@ -680,24 +643,16 @@ function aggregate(
   keySelector: (session: StoredSession) => string,
   limit: number,
 ): Array<{ project: string; seconds: number }> {
-  const secondsByKey = new Map<string, number>();
-  for (const session of sessions) {
-    const key = keySelector(session);
-    secondsByKey.set(key, (secondsByKey.get(key) ?? 0) + session.durationSeconds);
-  }
-
-  return Array.from(secondsByKey, ([project, seconds]) => ({ project, seconds }))
-    .sort((left, right) => right.seconds - left.seconds)
-    .slice(0, limit);
+  const totals = new Map<string, number>();
+  for (const session of sessions) totals.set(keySelector(session), (totals.get(keySelector(session)) ?? 0) + session.durationSeconds);
+  return Array.from(totals, ([project, seconds]) => ({ project, seconds }))
+    .sort((a, b) => b.seconds - a.seconds).slice(0, limit);
 }
 
 function getCurrentStreak(dates: string[], todayKey: string): number {
   const dateSet = new Set(dates);
-  let cursor = new Date(`${todayKey}T12:00:00`);
-  if (!dateSet.has(todayKey)) {
-    cursor.setDate(cursor.getDate() - 1);
-  }
-
+  const cursor = new Date(`${todayKey}T12:00:00`);
+  if (!dateSet.has(todayKey)) cursor.setDate(cursor.getDate() - 1);
   let streak = 0;
   while (dateSet.has(getLocalDateKey(cursor))) {
     streak += 1;
@@ -710,7 +665,6 @@ function getLongestStreak(dates: string[]): number {
   let longest = 0;
   let current = 0;
   let previous: Date | undefined;
-
   for (const key of dates) {
     const date = new Date(`${key}T12:00:00`);
     const gap = previous ? Math.round((date.getTime() - previous.getTime()) / 86_400_000) : 0;
@@ -723,25 +677,15 @@ function getLongestStreak(dates: string[]): number {
 
 function sessionsToCsv(sessions: StoredSession[]): string {
   const columns: Array<keyof StoredSession> = [
-    'id',
-    'start',
-    'end',
-    'durationSeconds',
-    'project',
-    'language',
-    'localDate',
-    'localHour',
-    'mode',
+    'id', 'start', 'end', 'durationSeconds', 'project', 'language', 'localDate', 'localHour', 'mode',
   ];
-  return [
-    columns.join(','),
-    ...sessions.map((session) => columns.map((column) => csvCell(String(session[column]))).join(',')),
-  ].join('\r\n');
+  return [columns.join(','), ...sessions.map((session) => columns.map((column) => csvCell(String(session[column]))).join(','))]
+    .join('\r\n');
 }
 
 function csvCell(value: string): string {
-  const spreadsheetSafeValue = /^[\t\r ]*[=+\-@]/.test(value) ? `'${value}` : value;
-  return `"${spreadsheetSafeValue.replace(/"/g, '""')}"`;
+  const safe = /^[\t\r ]*[=+\-@]/.test(value) ? `'${value}` : value;
+  return `"${safe.replace(/"/g, '""')}"`;
 }
 
 function delay(milliseconds: number): Promise<void> {
