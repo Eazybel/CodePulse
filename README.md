@@ -8,6 +8,7 @@ CodePulse Tracker is a private, offline-first coding activity tracker for Visual
 - Splits tracked time at local hour and day boundaries, uses elapsed monotonic time, and limits long timer gaps after sleep or event-loop stalls.
 - Tracks workspace and language changes as they happen.
 - Persists local sessions through serialized, atomic file replacement with a recoverable backup.
+- Keeps saved daily totals across VS Code restarts and aggregates activity from all projects in the same profile.
 - Shows project and language breakdowns, daily goal progress, current and longest streaks, peak coding hour, and an hourly activity chart.
 - Exports session history as JSON or CSV from the dashboard or Command Palette.
 - Keeps session data on the machine; no account or network service is required.

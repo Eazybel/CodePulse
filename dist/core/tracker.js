@@ -38,7 +38,9 @@ const fs = __importStar(require("node:fs"));
 const path = __importStar(require("node:path"));
 const node_crypto_1 = require("node:crypto");
 const vscode = __importStar(require("vscode"));
+const dataStore_1 = require("./dataStore");
 const timeUtils_1 = require("./timeUtils");
+const CHECKPOINT_INTERVAL_MS = 5_000;
 const LEASE_EXPIRY_MS = 15_000;
 const MAX_TICK_GAP_MS = 15_000;
 const LEASE_RECHECK_DELAY_MS = 150;
@@ -59,6 +61,7 @@ class CodePulseTracker {
     activeProject = 'Workspace';
     activeLanguage = 'Unknown';
     pendingSegment;
+    lastCheckpointAt = 0;
     dashboardRefresh;
     constructor(context, dataStore) {
         this.instanceId = (0, node_crypto_1.randomUUID)();
@@ -66,7 +69,7 @@ class CodePulseTracker {
         this.leasePath = path.join(context.globalStorageUri.fsPath, 'codepulse-owner-lease.json');
         this.statusBarItem = vscode.window.createStatusBarItem('codepulse.timer', vscode.StatusBarAlignment.Right, 1000);
         this.statusBarItem.text = '$(watch) 0m';
-        this.statusBarItem.tooltip = 'CodePulse: Not currently tracking. Click to open the dashboard.';
+        this.statusBarItem.tooltip = 'CodePulse: Time tracked today. Click to open the dashboard.';
         this.statusBarItem.command = 'codepulse.openDashboard';
         this.statusBarItem.show();
         this.disposables = [this.statusBarItem];
@@ -104,12 +107,20 @@ class CodePulseTracker {
         }));
         this.activeProject = this.resolveProjectName(vscode.window.activeTextEditor);
         this.activeLanguage = this.resolveLanguage(vscode.window.activeTextEditor);
+        // Recover the last checkpoint when VS Code or the extension was closed before
+        // its pending segment could be saved. All windows use the same global store.
+        const minSessionSeconds = vscode.workspace.getConfiguration('codepulse').get('minSessionSeconds', 10) ?? 10;
+        if (this.dataStore.recoverStaleCheckpoints(this.instanceId, minSessionSeconds) > 0) {
+            this.dashboardRefresh?.();
+        }
         void this.tick();
     }
     async resetTracking() {
         this.resetting = true;
         await this.tick();
         this.pendingSegment = undefined;
+        this.dataStore.setLiveInterval(null);
+        this.dataStore.clearCheckpoint(this.instanceId);
         this.tracking = false;
         this.activeElapsedMs = 0;
         this.focusLostAt = null;
@@ -133,6 +144,8 @@ class CodePulseTracker {
     async finish() {
         await this.tick();
         this.flushPendingSegment();
+        this.dataStore.setLiveInterval(null);
+        this.dataStore.clearCheckpoint(this.instanceId);
         await this.dataStore.flush();
         await this.releaseLease();
     }
@@ -158,12 +171,20 @@ class CodePulseTracker {
             const now = Date.now();
             const monotonicNow = process.hrtime.bigint();
             const shouldRun = !this.resetting &&
-                vscode.workspace.getConfiguration('codepulse').get('enabled', true)
-                && this.shouldTrack();
+                vscode.workspace.getConfiguration('codepulse').get('enabled', true) &&
+                this.shouldTrack();
             const ownsLease = shouldRun && await this.acquireLease(now);
+            if (ownsLease && !this.tracking) {
+                const minSessionSeconds = vscode.workspace.getConfiguration('codepulse')
+                    .get('minSessionSeconds', 10) ?? 10;
+                if (this.dataStore.recoverStaleCheckpoints(this.instanceId, minSessionSeconds, Date.now(), 0) > 0) {
+                    this.dashboardRefresh?.();
+                }
+            }
             if (ownsLease && this.tracking) {
                 this.recordElapsed(now, monotonicNow);
                 await this.renewLease(now);
+                this.updateCheckpoint(now);
             }
             else {
                 if (this.tracking) {
@@ -181,6 +202,10 @@ class CodePulseTracker {
                     this.activeLanguage = this.resolveLanguage(vscode.window.activeTextEditor);
                     await this.renewLease(now);
                 }
+                else {
+                    this.dataStore.setLiveInterval(null);
+                    this.dataStore.clearCheckpoint(this.instanceId);
+                }
             }
             if (!ownsLease) {
                 this.pendingSegment = undefined;
@@ -195,6 +220,8 @@ class CodePulseTracker {
             this.lastTickMonotonic = undefined;
             this.wallCursor = undefined;
             this.pendingSegment = undefined;
+            this.dataStore.setLiveInterval(null);
+            this.dataStore.clearCheckpoint(this.instanceId);
             console.error('CodePulse tracking tick failed.', error);
         }
     }
@@ -207,9 +234,8 @@ class CodePulseTracker {
         }
         const elapsedMs = Math.min(MAX_TICK_GAP_MS, Math.max(0, Number(monotonicNow - monotonicPrevious) / 1_000_000));
         this.lastTickMonotonic = monotonicNow;
-        if (elapsedMs <= 0) {
+        if (elapsedMs <= 0)
             return;
-        }
         this.activeElapsedMs += elapsedMs;
         const start = Math.max(this.wallCursor ?? now - elapsedMs, now - elapsedMs);
         const end = start + elapsedMs;
@@ -236,11 +262,13 @@ class CodePulseTracker {
             pending.durationMs += segment.durationMs;
         }
         else {
-            const timeBoundaryOnly = pending &&
-                isSameActivity(pending, segment) &&
+            const timeBoundaryOnly = pending && isSameActivity(pending, segment) &&
                 (pending.date !== segment.date || pending.hour !== segment.hour);
             this.flushPendingSegment(timeBoundaryOnly ? 0 : minSessionMs);
             this.pendingSegment = segment;
+        }
+        if (this.pendingSegment) {
+            this.dataStore.setLiveInterval(this.pendingSegment.start);
         }
         if (this.pendingSegment && this.pendingSegment.durationMs >= Math.max(minSessionMs, 1_000)) {
             this.flushPendingSegment(minSessionMs);
@@ -249,11 +277,11 @@ class CodePulseTracker {
     flushPendingSegment(minSessionMs = Math.max(0, (vscode.workspace.getConfiguration('codepulse').get('minSessionSeconds', 10) ?? 10) * 1000)) {
         const pending = this.pendingSegment;
         this.pendingSegment = undefined;
-        if (!pending || pending.durationMs < minSessionMs || pending.durationMs <= 0) {
+        this.dataStore.setLiveInterval(null);
+        if (!pending || pending.durationMs < minSessionMs || pending.durationMs <= 0)
             return;
-        }
         const session = {
-            id: (0, node_crypto_1.randomUUID)(),
+            id: (0, dataStore_1.sessionIdFor)(this.instanceId, pending.start),
             start: pending.start,
             end: pending.end,
             durationSeconds: pending.durationMs / 1000,
@@ -271,82 +299,88 @@ class CodePulseTracker {
             console.error('CodePulse could not save a tracking segment.', error);
         }
     }
+    updateCheckpoint(now) {
+        const pending = this.pendingSegment;
+        if (!pending) {
+            this.dataStore.clearCheckpoint(this.instanceId);
+            this.lastCheckpointAt = now;
+            return;
+        }
+        this.dataStore.setLiveInterval(pending.start);
+        if (now - this.lastCheckpointAt < CHECKPOINT_INTERVAL_MS)
+            return;
+        const checkpoint = {
+            instanceId: this.instanceId,
+            start: pending.start,
+            lastSeen: pending.end,
+            project: pending.project,
+            language: pending.language,
+            mode: pending.mode,
+        };
+        this.dataStore.writeCheckpoint(checkpoint);
+        this.lastCheckpointAt = now;
+    }
     shouldTrack() {
         const config = vscode.workspace.getConfiguration('codepulse');
-        const mode = this.getTrackingMode();
-        if (mode === 'alwaysOpen') {
+        if (this.getTrackingMode() === 'alwaysOpen')
             return true;
-        }
-        const focused = vscode.window.state.focused;
-        if (focused) {
+        if (vscode.window.state.focused) {
             this.focusLostAt = null;
             return true;
         }
         const focusGracePeriodMs = Math.max(0, config.get('focusGracePeriod', 30) ?? 30) * 1000;
-        if (this.focusLostAt === null) {
+        if (this.focusLostAt === null)
             this.focusLostAt = Date.now();
-        }
         return this.tracking && Date.now() - this.focusLostAt <= focusGracePeriodMs;
     }
     updateStatusBar() {
-        if (!this.tracking) {
-            this.statusBarItem.text = '$(watch) 0m';
-            this.statusBarItem.tooltip = 'CodePulse: Not currently tracking. Click to open the dashboard.';
-            return;
-        }
-        const elapsedMinutes = Math.floor(this.activeElapsedMs / 60_000);
-        this.statusBarItem.text = `$(watch) ${(0, timeUtils_1.formatDurationMinutes)(elapsedMinutes)}`;
-        this.statusBarItem.tooltip = 'CodePulse: Time tracked in the current session. Click to open the dashboard.';
+        // The status bar is the total for the local day across all projects and VS Code
+        // windows, not the elapsed time since this workspace/window started tracking.
+        this.dataStore.setLiveInterval(this.pendingSegment?.start ?? null);
+        const todayMinutes = Math.floor(this.dataStore.getTodaySeconds() / 60);
+        this.statusBarItem.text = `$(watch) ${(0, timeUtils_1.formatDurationMinutes)(todayMinutes)}`;
+        this.statusBarItem.tooltip = this.tracking
+            ? 'CodePulse: Time tracked today across projects (tracking now). Click to open the dashboard.'
+            : 'CodePulse: Time tracked today across projects. Not tracking right now. Click to open the dashboard.';
     }
     async acquireLease(now) {
         await fs.promises.mkdir(path.dirname(this.leasePath), { recursive: true });
         const currentLease = await this.readLease();
-        if (currentLease?.instanceId === this.instanceId) {
+        if (currentLease?.instanceId === this.instanceId)
             return true;
-        }
-        if (currentLease && isLeaseFresh(currentLease.lastSeenMs, now)) {
+        if (currentLease && isLeaseFresh(currentLease.lastSeenMs, now))
             return false;
-        }
         if (currentLease) {
             await delay(LEASE_RECHECK_DELAY_MS);
             const confirmedLease = await this.readLease();
-            if (confirmedLease &&
-                (confirmedLease.instanceId !== currentLease.instanceId ||
-                    confirmedLease.lastSeenMs !== currentLease.lastSeenMs ||
-                    isLeaseFresh(confirmedLease.lastSeenMs, Date.now()))) {
+            if (confirmedLease && (confirmedLease.instanceId !== currentLease.instanceId ||
+                confirmedLease.lastSeenMs !== currentLease.lastSeenMs || isLeaseFresh(confirmedLease.lastSeenMs, Date.now()))) {
                 return false;
             }
             await fs.promises.unlink(this.leasePath).catch((error) => {
-                if (!isNodeError(error, 'ENOENT')) {
+                if (!isNodeError(error, 'ENOENT'))
                     throw error;
-                }
             });
         }
         else {
             const currentStat = await fs.promises.stat(this.leasePath).catch((error) => {
-                if (isNodeError(error, 'ENOENT')) {
+                if (isNodeError(error, 'ENOENT'))
                     return undefined;
-                }
                 throw error;
             });
             if (currentStat) {
                 await delay(LEASE_RECHECK_DELAY_MS);
                 const confirmedStat = await fs.promises.stat(this.leasePath).catch((error) => {
-                    if (isNodeError(error, 'ENOENT')) {
+                    if (isNodeError(error, 'ENOENT'))
                         return undefined;
-                    }
                     throw error;
                 });
-                if (!confirmedStat ||
-                    confirmedStat.ino !== currentStat.ino ||
-                    confirmedStat.mtimeMs !== currentStat.mtimeMs ||
-                    Math.abs(Date.now() - confirmedStat.mtimeMs) < LEASE_EXPIRY_MS) {
+                if (!confirmedStat || confirmedStat.ino !== currentStat.ino || confirmedStat.mtimeMs !== currentStat.mtimeMs ||
+                    Math.abs(Date.now() - confirmedStat.mtimeMs) < LEASE_EXPIRY_MS)
                     return false;
-                }
                 await fs.promises.unlink(this.leasePath).catch((error) => {
-                    if (!isNodeError(error, 'ENOENT')) {
+                    if (!isNodeError(error, 'ENOENT'))
                         throw error;
-                    }
                 });
             }
         }
@@ -361,9 +395,8 @@ class CodePulseTracker {
             return true;
         }
         catch (error) {
-            if (isNodeError(error, 'EEXIST')) {
+            if (isNodeError(error, 'EEXIST'))
                 return false;
-            }
             throw error;
         }
     }
@@ -375,6 +408,8 @@ class CodePulseTracker {
             this.lastTickMonotonic = undefined;
             this.wallCursor = undefined;
             this.pendingSegment = undefined;
+            this.dataStore.setLiveInterval(null);
+            this.dataStore.clearCheckpoint(this.instanceId);
             return;
         }
         const temporaryPath = `${this.leasePath}.${this.instanceId}.tmp`;
@@ -388,9 +423,8 @@ class CodePulseTracker {
         const lease = await this.readLease();
         if (lease?.instanceId === this.instanceId) {
             await fs.promises.unlink(this.leasePath).catch((error) => {
-                if (!isNodeError(error, 'ENOENT')) {
+                if (!isNodeError(error, 'ENOENT'))
                     console.error('CodePulse could not release its tracking lease.', error);
-                }
             });
         }
     }
@@ -398,20 +432,16 @@ class CodePulseTracker {
         try {
             const content = await fs.promises.readFile(this.leasePath, 'utf8');
             const parsed = JSON.parse(content);
-            if (typeof parsed !== 'object' ||
-                parsed === null ||
-                typeof parsed.instanceId !== 'string' ||
-                !Number.isFinite(parsed.lastSeenMs) ||
-                typeof parsed.workspacePath !== 'string') {
+            if (typeof parsed !== 'object' || parsed === null || typeof parsed.instanceId !== 'string' ||
+                !Number.isFinite(parsed.lastSeenMs) || typeof parsed.workspacePath !== 'string') {
                 console.error('CodePulse found a malformed ownership lease.');
                 return undefined;
             }
             return parsed;
         }
         catch (error) {
-            if (isNodeError(error, 'ENOENT')) {
+            if (isNodeError(error, 'ENOENT'))
                 return undefined;
-            }
             if (error instanceof SyntaxError) {
                 console.error('CodePulse found a malformed ownership lease.', error);
                 return undefined;
@@ -441,14 +471,10 @@ class CodePulseTracker {
 }
 exports.CodePulseTracker = CodePulseTracker;
 function isSameAttribution(left, right) {
-    return isSameActivity(left, right) &&
-        left.date === right.date &&
-        left.hour === right.hour;
+    return isSameActivity(left, right) && left.date === right.date && left.hour === right.hour;
 }
 function isSameActivity(left, right) {
-    return left.project === right.project &&
-        left.language === right.language &&
-        left.mode === right.mode;
+    return left.project === right.project && left.language === right.language && left.mode === right.mode;
 }
 function isNodeError(error, code) {
     return error instanceof Error && 'code' in error && error.code === code;
