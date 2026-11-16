@@ -8,6 +8,8 @@ dist/test/**
 PRODUCTION_CHECKLIST.md
 tsconfig.json
 .gitignore
+eslint.config.mjs
+package-lock.json
 src/**
 .vscode/**
 .npmrc

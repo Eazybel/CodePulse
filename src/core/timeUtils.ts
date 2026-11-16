@@ -1,10 +1,18 @@
 export type TrackingMode = 'alwaysOpen' | 'windowFocused';
+export type Timeframe = 'day' | 'week' | 'month';
 
 export interface IntervalSegment {
   start: number;
   end: number;
   dateKey: string;
   hour: number;
+}
+
+export interface TimeframeRange {
+  start: number;
+  end: number;
+  startDate: string;
+  endDate: string;
 }
 
 export function getLocalDateKey(date: Date): string {
@@ -23,7 +31,7 @@ export function clampDuration(startMs: number, endMs: number): number {
 }
 
 export function splitIntervalAtMidnight(startMs: number, endMs: number): IntervalSegment[] {
-  if (endMs <= startMs) {
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
     return [];
   }
 
@@ -32,22 +40,22 @@ export function splitIntervalAtMidnight(startMs: number, endMs: number): Interva
 
   while (cursor < endMs) {
     const current = new Date(cursor);
-    const nextMidnight = new Date(
+    const nextHour = new Date(
       current.getFullYear(),
       current.getMonth(),
-      current.getDate() + 1,
-      0,
+      current.getDate(),
+      current.getHours() + 1,
       0,
       0,
       0,
     ).getTime();
+    const segmentEnd = Math.min(endMs, nextHour);
 
-    const segmentEnd = Math.min(endMs, nextMidnight);
     segments.push({
       start: cursor,
       end: segmentEnd,
-      dateKey: getLocalDateKey(new Date(cursor)),
-      hour: new Date(cursor).getHours(),
+      dateKey: getLocalDateKey(current),
+      hour: current.getHours(),
     });
 
     cursor = segmentEnd;
@@ -56,13 +64,33 @@ export function splitIntervalAtMidnight(startMs: number, endMs: number): Interva
   return segments;
 }
 
-export function formatDuration(totalSeconds: number): string {
-  const seconds = Math.max(0, Math.round(totalSeconds));
+export function getTimeframeRange(timeframe: Timeframe, now: number = Date.now()): TimeframeRange {
+  const endDate = new Date(now);
+  const startDate = new Date(now);
+  startDate.setHours(0, 0, 0, 0);
 
+  if (timeframe === 'week') {
+    startDate.setDate(startDate.getDate() - ((startDate.getDay() + 6) % 7));
+  } else if (timeframe === 'month') {
+    startDate.setDate(1);
+  }
+
+  const endOfRange = new Date(endDate);
+  endOfRange.setHours(23, 59, 59, 999);
+
+  return {
+    start: startDate.getTime(),
+    end: endDate.getTime(),
+    startDate: getLocalDateKey(startDate),
+    endDate: getLocalDateKey(endOfRange),
+  };
+}
+
+export function formatDuration(totalSeconds: number): string {
+  const seconds = Number.isFinite(totalSeconds) ? Math.max(0, Math.round(totalSeconds)) : 0;
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   const remainingSeconds = seconds % 60;
-
   const parts: string[] = [];
 
   if (hours > 0) {
@@ -74,7 +102,6 @@ export function formatDuration(totalSeconds: number): string {
   }
 
   parts.push(`${remainingSeconds}s`);
-
   return parts.join(' ');
 }
 

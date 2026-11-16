@@ -57,5 +57,36 @@ const timeUtils_1 = require("../core/timeUtils");
         assert.equal(segments[0].end - segments[0].start, 30 * 60 * 1000);
         assert.equal(segments[1].end - segments[1].start, 45 * 60 * 1000);
     });
+    (0, node_test_1.it)('splits elapsed time across a daylight-saving transition without adding or losing time', () => {
+        const previousTimezone = process.env.TZ;
+        process.env.TZ = 'America/New_York';
+        try {
+            const start = new Date(2024, 2, 10, 1, 30).getTime();
+            const end = new Date(2024, 2, 10, 3, 30).getTime();
+            const segments = (0, timeUtils_1.splitIntervalAtMidnight)(start, end);
+            assert.equal(end - start, 60 * 60 * 1000);
+            assert.equal(segments.reduce((total, segment) => total + segment.end - segment.start, 0), end - start);
+            assert.ok(segments.every((segment) => segment.dateKey === '2024-03-10'));
+        }
+        finally {
+            if (previousTimezone === undefined) {
+                delete process.env.TZ;
+            }
+            else {
+                process.env.TZ = previousTimezone;
+            }
+        }
+    });
+    (0, node_test_1.it)('returns local calendar boundaries for daily, weekly, and monthly timeframes', () => {
+        const now = new Date(2026, 10, 16, 13, 30).getTime();
+        assert.equal((0, timeUtils_1.getTimeframeRange)('day', now).startDate, '2026-11-16');
+        assert.equal((0, timeUtils_1.getTimeframeRange)('week', now).startDate, '2026-11-16');
+        assert.equal((0, timeUtils_1.getTimeframeRange)('month', now).startDate, '2026-11-01');
+        assert.equal((0, timeUtils_1.getTimeframeRange)('day', now).endDate, '2026-11-16');
+    });
+    (0, node_test_1.it)('returns no segments for invalid or reversed intervals', () => {
+        assert.deepEqual((0, timeUtils_1.splitIntervalAtMidnight)(Number.NaN, 10), []);
+        assert.deepEqual((0, timeUtils_1.splitIntervalAtMidnight)(20, 10), []);
+    });
 });
 //# sourceMappingURL=timeUtils.test.js.map
