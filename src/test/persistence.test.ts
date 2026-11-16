@@ -104,6 +104,24 @@ describe('daily totals across VS Code restarts', () => {
     }
   });
 
+  it('recovers a recent checkpoint after the previous tracking owner releases its lease', () => {
+    const dir = makeDir();
+    try {
+      const now = new Date(2024, 5, 5, 10, 0, 0).getTime();
+      const start = now - 60_000;
+      const store = new DataStore(dir);
+      store.writeCheckpoint({
+        instanceId: 'deadbeef-0000', start, lastSeen: now - 5_000,
+        project: 'demo', language: 'typescript', mode: 'alwaysOpen',
+      });
+
+      assert.equal(store.recoverStaleCheckpoints('new-owner', 10, now, 0), 1);
+      assert.equal(store.getTodaySeconds(now), 55);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('leaves the checkpoint of a window that is still running alone', () => {
     const dir = makeDir();
     try {

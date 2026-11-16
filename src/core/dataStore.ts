@@ -136,21 +136,22 @@ export class DataStore {
       throw new TypeError('Cannot append an invalid CodePulse session.');
     }
     store.reloadIfChanged();
-    if (store.sessionIds.has(session.id)) {
+    const clipped = clipSessionsAfter([session], store.snapshot.resetAt)[0];
+    if (!clipped || store.sessionIds.has(clipped.id)) {
       return;
     }
 
     const sessions = store.snapshot.sessions;
     const previous = sessions[sessions.length - 1];
-    if (previous && canMergeSessions(previous, session)) {
-      previous.end = Math.max(previous.end, session.end);
+    if (previous && canMergeSessions(previous, clipped)) {
+      previous.end = Math.max(previous.end, clipped.end);
       previous.durationSeconds = (previous.end - previous.start) / 1000;
       store.markPending(previous.id);
     } else {
-      sessions.push({ ...session });
+      sessions.push(clipped);
       sessions.sort((left, right) => left.start - right.start);
-      store.sessionIds.add(session.id);
-      store.markPending(session.id);
+      store.sessionIds.add(clipped.id);
+      store.markPending(clipped.id);
     }
     store.snapshot.lastUpdated = Date.now();
     store.schedulePersist();

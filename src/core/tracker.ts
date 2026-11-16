@@ -179,6 +179,14 @@ export class CodePulseTracker implements vscode.Disposable {
         this.shouldTrack();
       const ownsLease = shouldRun && await this.acquireLease(now);
 
+      if (ownsLease && !this.tracking) {
+        const minSessionSeconds = vscode.workspace.getConfiguration('codepulse')
+          .get<number>('minSessionSeconds', 10) ?? 10;
+        if (this.dataStore.recoverStaleCheckpoints(this.instanceId, minSessionSeconds, Date.now(), 0) > 0) {
+          this.dashboardRefresh?.();
+        }
+      }
+
       if (ownsLease && this.tracking) {
         this.recordElapsed(now, monotonicNow);
         await this.renewLease(now);
