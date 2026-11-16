@@ -2,7 +2,7 @@
   "name": "codepulse-tracker",
   "displayName": "CodePulse Tracker",
   "description": "Offline-first productivity analytics dashboard for VS Code.",
-  "version": "1.0.3",
+  "version": "1.1.1",
   "publisher": "codepulse-tracker",
   "license": "MIT",
   "repository": {
@@ -93,8 +93,8 @@
   },
   "scripts": {
     "compile": "tsc -p ./tsconfig.json",
-    "test": "npm run compile && node --test dist/test/**/*.test.js",
-    "package": "npx @vscode/vsce package --out ./artifacts/codepulse-tracker-1.0.3.vsix",
+    "test": "npm run compile && node --test dist/test/*.test.js",
+    "package": "npx @vscode/vsce package --out ./artifacts/codepulse-tracker-1.1.1.vsix",
     "vscode:prepublish": "npm run compile"
   },
   "devDependencies": {
