@@ -190,6 +190,11 @@ export class DashboardPanel implements vscode.Disposable {
     .hour::-webkit-progress-bar { background: #374151; border-radius: 3px 3px 0 0; }
     .hour::-webkit-progress-value { background: var(--accent); border-radius: 3px 3px 0 0; }
     .hour-labels { display: flex; justify-content: space-between; margin-top: 7px; color: var(--muted); font-size: .72rem; }
+    .hours.daily { height: auto; gap: 8px; border-bottom: 0; }
+    .day-col { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; }
+    .day-col .hour { height: 128px; }
+    .day-label { color: var(--muted); font-size: .72rem; white-space: nowrap; }
+    .day-label.today { color: var(--accent); font-weight: 700; }
     .status { min-height: 1.2em; color: var(--muted); font-size: .82rem; }
     .empty { color: var(--muted); padding: 8px 0; }
     @media(max-width:850px) { .grid { grid-template-columns: 1fr; } }
@@ -221,7 +226,7 @@ export class DashboardPanel implements vscode.Disposable {
           <div class="card-head"><h2>Daily coding goal</h2><strong id="goal-label">0 / 0</strong></div>
           <progress class="progress" aria-label="Daily coding goal progress" id="goal-progress" max="100" value="0"></progress>
         </section>
-        <section class="panel"><h2>Hourly activity</h2><div class="hours" id="hours"></div><div class="hour-labels"><span>12 AM</span><span>6 AM</span><span>12 PM</span><span>6 PM</span><span>11 PM</span></div><p class="muted" id="peak-hour">Peak coding hour: no activity yet</p></section>
+        <section class="panel"><h2 id="activity-title">Hourly activity</h2><div class="hours" id="hours"></div><div class="hour-labels" id="hour-labels"><span>12 AM</span><span>6 AM</span><span>12 PM</span><span>6 PM</span><span>11 PM</span></div><p class="muted" id="peak-hour">Peak coding hour: no activity yet</p></section>
         <section class="panel"><h2>Recent sessions</h2><div id="sessions" class="list"></div></section>
       </div>
       <div class="stack">
@@ -265,6 +270,63 @@ export class DashboardPanel implements vscode.Disposable {
         element.appendChild(row);
       }
     };
+    const renderActivity = (summary) => {
+      const hours = byId('hours');
+      const labels = byId('hour-labels');
+      const title = byId('activity-title');
+      const peak = byId('peak-hour');
+      hours.replaceChildren();
+      hours.style.gridTemplateColumns = '';
+      if (summary.timeframe === 'day') {
+        hours.classList.remove('daily');
+        labels.hidden = false;
+        title.textContent = 'Hourly activity';
+        const max = Math.max(1, ...summary.hourlyActivity);
+        summary.hourlyActivity.forEach((seconds, index) => {
+          const bar = document.createElement('progress');
+          bar.className = 'hour';
+          bar.max = max;
+          bar.value = seconds;
+          bar.title = index + ':00 · ' + formatDuration(seconds);
+          hours.appendChild(bar);
+        });
+        peak.textContent = summary.peakCodingHour === null
+          ? 'Peak coding hour: no activity yet'
+          : 'Peak coding hour: ' + summary.peakCodingHour + ':00';
+        return;
+      }
+
+      const buckets = summary.dailyBreakdown;
+      hours.classList.add('daily');
+      labels.hidden = true;
+      title.textContent = summary.timeframe === 'week' ? 'Daily activity this week' : 'Daily activity this month';
+      hours.style.gridTemplateColumns = 'repeat(' + buckets.length + ', minmax(0, 1fr))';
+      const max = Math.max(1, ...buckets.map((bucket) => bucket.seconds));
+      for (const bucket of buckets) {
+        const column = document.createElement('div');
+        column.className = 'day-col';
+        const bar = document.createElement('progress');
+        bar.className = 'hour';
+        bar.max = max;
+        bar.value = bucket.seconds;
+        bar.title = longDate(bucket.date) + ' · ' + formatDuration(bucket.seconds);
+        const label = document.createElement('span');
+        label.className = bucket.isToday ? 'day-label today' : 'day-label';
+        label.textContent = bucket.label;
+        column.append(bar, label);
+        hours.appendChild(column);
+      }
+
+      const busiest = buckets.reduce((best, bucket) => (bucket.seconds > best.seconds ? bucket : best), buckets[0]);
+      peak.textContent = busiest && busiest.seconds > 0
+        ? 'Most active day: ' + longDate(busiest.date) + ' (' + formatDuration(busiest.seconds) + ')'
+        : 'Most active day: no activity yet';
+    };
+    const longDate = (dateKey) => new Date(dateKey + 'T00:00:00').toLocaleDateString(undefined, {
+      weekday: 'long',
+      month: 'short',
+      day: 'numeric',
+    });
     const render = (summary) => {
       byId('period-total').textContent = formatDuration(summary.totalSeconds);
       byId('active-days').textContent = String(summary.activeDays);
@@ -298,20 +360,7 @@ export class DashboardPanel implements vscode.Disposable {
         row.append(title, duration, date);
         sessionList.appendChild(row);
       }
-      const hours = byId('hours');
-      hours.replaceChildren();
-      const max = Math.max(1, ...summary.hourlyActivity);
-      summary.hourlyActivity.forEach((seconds, index) => {
-        const bar = document.createElement('progress');
-        bar.className = 'hour';
-        bar.max = max;
-        bar.value = seconds;
-        bar.title = index + ':00 · ' + formatDuration(seconds);
-        hours.appendChild(bar);
-      });
-      byId('peak-hour').textContent = summary.peakCodingHour === null
-        ? 'Peak coding hour: no activity yet'
-        : 'Peak coding hour: ' + summary.peakCodingHour + ':00';
+      renderActivity(summary);
       byId('active-ratio').textContent = summary.activeRatioPercent + '%';
       byId('idle-ratio').textContent = summary.idleRatioPercent + '%';
     };

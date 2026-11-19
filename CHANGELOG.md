@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.2
+
+- Weekly mode now shows a per-day bar chart labelled Mon–Sun, with the most active day summarized under it.
+- Monthly mode now shows a per-day bar chart for every day of the month instead of repeating the 24-hour view.
+- Daily mode keeps the hourly activity view.
+
 ## 1.1.0 - 2026-11-16
 
 - Hardened cross-window tracking ownership and serialized shared-state writes.
