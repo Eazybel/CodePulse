@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.3
+
+- Same weekly and monthly per-day analytics as 1.1.2, released under a new version because 1.1.2 already existed on the Marketplace.
+
 ## 1.1.2
 
 - Weekly mode now shows a per-day bar chart labelled Mon–Sun, with the most active day summarized under it.
