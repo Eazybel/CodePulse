@@ -2,7 +2,23 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { getLocalDateKey, getTimeframeRange, splitIntervalAtMidnight, Timeframe, TrackingMode } from './timeUtils';
+import {
+  getLocalDateKey,
+  getTimeframeRange,
+  splitIntervalAtMidnight,
+  Timeframe,
+  TimeframeRange,
+  TrackingMode,
+} from './timeUtils';
+
+export interface DailyBucket {
+  /** Local date key, YYYY-MM-DD. */
+  date: string;
+  /** Short weekday name ("Mon") in weekly mode, day of month ("16") in monthly mode. */
+  label: string;
+  seconds: number;
+  isToday: boolean;
+}
 
 export interface StoredSession {
   id: string;
@@ -35,6 +51,8 @@ export interface DashboardSummary {
   longestStreak: number;
   peakCodingHour: number | null;
   hourlyActivity: number[];
+  /** One bar per day for weekly (Mon-Sun) and monthly (1..last day) modes; empty for daily mode. */
+  dailyBreakdown: DailyBucket[];
   activeRatioPercent: number;
   idleRatioPercent: number;
 }
@@ -280,6 +298,7 @@ export class DataStore {
       longestStreak: getLongestStreak(dates),
       peakCodingHour: peakSeconds === 0 ? null : hourlyActivity.indexOf(peakSeconds),
       hourlyActivity,
+      dailyBreakdown: buildDailyBreakdown(timeframe, range, sessions, now),
       activeRatioPercent,
       idleRatioPercent: 100 - activeRatioPercent,
     };
@@ -698,6 +717,42 @@ function clipSessionsAfter(sessions: StoredSession[], cutoff: number): StoredSes
     }
     return session.durationSeconds > 0 ? [session] : [];
   });
+}
+
+const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function buildDailyBreakdown(
+  timeframe: Timeframe,
+  range: TimeframeRange,
+  sessions: StoredSession[],
+  now: number,
+): DailyBucket[] {
+  if (timeframe === 'day') {
+    return [];
+  }
+
+  // range.startDate is the first day of the week (Monday) or month (day 1).
+  const [year, month, firstDay] = range.startDate.split('-').map(Number);
+  const dayCount = timeframe === 'week' ? 7 : new Date(year, month, 0).getDate();
+
+  const secondsByDate = new Map<string, number>();
+  for (const session of sessions) {
+    secondsByDate.set(session.localDate, (secondsByDate.get(session.localDate) ?? 0) + session.durationSeconds);
+  }
+
+  const todayKey = getLocalDateKey(new Date(now));
+  const buckets: DailyBucket[] = [];
+  for (let offset = 0; offset < dayCount; offset += 1) {
+    const day = new Date(year, month - 1, firstDay + offset);
+    const date = getLocalDateKey(day);
+    buckets.push({
+      date,
+      label: timeframe === 'week' ? WEEKDAY_NAMES[day.getDay()] : String(day.getDate()),
+      seconds: secondsByDate.get(date) ?? 0,
+      isToday: date === todayKey,
+    });
+  }
+  return buckets;
 }
 
 function aggregate(
