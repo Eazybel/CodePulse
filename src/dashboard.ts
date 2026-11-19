@@ -3,9 +3,13 @@ import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 
 import { CodePulseSnapshot, DataStore, DashboardSummary } from './core/dataStore';
-import { Timeframe } from './core/timeUtils';
+import { CustomDateRange, isValidCustomRange, Timeframe } from './core/timeUtils';
 
-type ExportHandler = (format: 'json' | 'csv', timeframe: Timeframe) => Promise<string | undefined>;
+type ExportHandler = (
+  format: 'json' | 'csv',
+  timeframe: Timeframe,
+  customRange?: CustomDateRange,
+) => Promise<string | undefined>;
 
 export class DashboardPanel implements vscode.Disposable {
   public static currentPanel: DashboardPanel | undefined;
@@ -17,6 +21,7 @@ export class DashboardPanel implements vscode.Disposable {
   private refreshInProgress = false;
   private refreshQueued = false;
   private timeframe: Timeframe = 'day';
+  private customRange: CustomDateRange | undefined;
   private exportHandler: ExportHandler;
 
   private constructor(
@@ -95,7 +100,12 @@ export class DashboardPanel implements vscode.Disposable {
         return;
       }
       const dailyGoalMinutes = vscode.workspace.getConfiguration('codepulse').get<number>('dailyGoalMinutes', 120) ?? 120;
-      const summary: DashboardSummary = this.dataStore.getDashboardSummary(Date.now(), dailyGoalMinutes, this.timeframe);
+      const summary: DashboardSummary = this.dataStore.getDashboardSummary(
+        Date.now(),
+        dailyGoalMinutes,
+        this.timeframe,
+        this.timeframe === 'custom' ? this.customRange : undefined,
+      );
       const snapshot: CodePulseSnapshot = this.dataStore.getSnapshot();
       await this.panel.webview.postMessage({ type: 'state', summary, lastUpdated: snapshot.lastUpdated });
     } catch (error) {
@@ -130,15 +140,31 @@ export class DashboardPanel implements vscode.Disposable {
       return;
     }
 
-    if (message.type === 'timeframe' && isTimeframe(message.value)) {
+    if (message.type === 'timeframe' && isPresetTimeframe(message.value)) {
       this.timeframe = message.value;
+      this.refresh();
+      return;
+    }
+
+    if (message.type === 'customRange' && typeof message.startDate === 'string' && typeof message.endDate === 'string') {
+      const range: CustomDateRange = { startDate: message.startDate, endDate: message.endDate };
+      if (!isValidCustomRange(range)) {
+        await this.panel.webview.postMessage({ type: 'invalidRange' });
+        return;
+      }
+      this.customRange = range;
+      this.timeframe = 'custom';
       this.refresh();
       return;
     }
 
     if (message.type === 'export' && (message.format === 'json' || message.format === 'csv')) {
       try {
-        const path = await this.exportHandler(message.format, this.timeframe);
+        const path = await this.exportHandler(
+          message.format,
+          this.timeframe,
+          this.timeframe === 'custom' ? this.customRange : undefined,
+        );
         await this.panel.webview.postMessage({
           type: path ? 'exported' : 'exportCancelled',
           ...(path ? { path } : {}),
@@ -195,6 +221,20 @@ export class DashboardPanel implements vscode.Disposable {
     .day-col .hour { height: 128px; }
     .day-label { color: var(--muted); font-size: .72rem; white-space: nowrap; }
     .day-label.today { color: var(--accent); font-weight: 700; }
+    .custom-range { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .custom-range[hidden] { display: none; }
+    input[type=date] { color-scheme: dark; color: var(--text); background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px; font: inherit; }
+    #sessions-toggle { margin-top: 12px; width: 100%; }
+    #sessions-toggle[hidden] { display: none; }
+    .heatmap { display: grid; grid-template-rows: repeat(7, 14px); grid-auto-flow: column; grid-auto-columns: 14px; gap: 3px; overflow-x: auto; padding-bottom: 4px; }
+    .cell { display: inline-block; width: 14px; height: 14px; border-radius: 3px; background: #1f2937; }
+    .cell.future { opacity: .3; }
+    .cell.lvl1 { background: rgba(56,189,248,.25); }
+    .cell.lvl2 { background: rgba(56,189,248,.45); }
+    .cell.lvl3 { background: rgba(56,189,248,.7); }
+    .cell.lvl4 { background: var(--accent); }
+    .legend { display: flex; align-items: center; gap: 4px; justify-content: flex-end; margin-top: 10px; font-size: .72rem; }
+    .legend .cell { width: 11px; height: 11px; }
     .status { min-height: 1.2em; color: var(--muted); font-size: .82rem; }
     .empty { color: var(--muted); padding: 8px 0; }
     @media(max-width:850px) { .grid { grid-template-columns: 1fr; } }
@@ -206,8 +246,12 @@ export class DashboardPanel implements vscode.Disposable {
     <div class="toolbar">
       <label for="timeframe">Period</label>
       <select id="timeframe" aria-label="Analytics timeframe">
-        <option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option>
+        <option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option><option value="custom">Custom range</option>
       </select>
+      <span class="custom-range" id="custom-range" hidden>
+        <label for="range-start">From</label><input type="date" id="range-start" aria-label="Start date">
+        <label for="range-end">To</label><input type="date" id="range-end" aria-label="End date">
+      </span>
       <div>
         <button id="export-json" type="button">Export JSON</button>
         <button id="export-csv" type="button">Export CSV</button>
@@ -226,8 +270,9 @@ export class DashboardPanel implements vscode.Disposable {
           <div class="card-head"><h2>Daily coding goal</h2><strong id="goal-label">0 / 0</strong></div>
           <progress class="progress" aria-label="Daily coding goal progress" id="goal-progress" max="100" value="0"></progress>
         </section>
+        <section class="panel"><h2>Activity heatmap, last 12 weeks</h2><div class="heatmap" id="heatmap" role="img" aria-label="Daily coding time heatmap"></div><div class="legend muted"><span>Less</span><span class="cell lvl0"></span><span class="cell lvl1"></span><span class="cell lvl2"></span><span class="cell lvl3"></span><span class="cell lvl4"></span><span>More</span></div></section>
         <section class="panel"><h2 id="activity-title">Hourly activity</h2><div class="hours" id="hours"></div><div class="hour-labels" id="hour-labels"><span>12 AM</span><span>6 AM</span><span>12 PM</span><span>6 PM</span><span>11 PM</span></div><p class="muted" id="peak-hour">Peak coding hour: no activity yet</p></section>
-        <section class="panel"><h2>Recent sessions</h2><div id="sessions" class="list"></div></section>
+        <section class="panel"><h2>Recent sessions</h2><div id="sessions" class="list"></div><button id="sessions-toggle" type="button" hidden>See more</button></section>
       </div>
       <div class="stack">
         <section class="panel"><h2>Project breakdown</h2><div id="projects" class="list"></div></section>
@@ -270,6 +315,54 @@ export class DashboardPanel implements vscode.Disposable {
         element.appendChild(row);
       }
     };
+    let lastSessions = [];
+    let showAllSessions = false;
+    const SESSIONS_PREVIEW = 5;
+    const renderSessions = () => {
+      const list = byId('sessions');
+      const toggle = byId('sessions-toggle');
+      list.replaceChildren();
+      if (!lastSessions.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = 'No tracked sessions in this period.';
+        list.appendChild(empty);
+        toggle.hidden = true;
+        return;
+      }
+      const visible = showAllSessions ? lastSessions : lastSessions.slice(0, SESSIONS_PREVIEW);
+      for (const session of visible) {
+        const row = document.createElement('div');
+        row.className = 'session';
+        const title = document.createElement('span');
+        title.className = 'session-title';
+        title.textContent = session.project + ' · ' + session.language;
+        const duration = document.createElement('span');
+        duration.className = 'session-duration';
+        duration.textContent = formatDuration(session.durationSeconds);
+        const date = document.createElement('span');
+        date.className = 'session-meta';
+        date.textContent = new Date(session.start).toLocaleString();
+        row.append(title, duration, date);
+        list.appendChild(row);
+      }
+      toggle.hidden = lastSessions.length <= SESSIONS_PREVIEW;
+      toggle.textContent = showAllSessions
+        ? 'Show less'
+        : 'See more (' + (lastSessions.length - SESSIONS_PREVIEW) + ' more)';
+    };
+    const renderHeatmap = (days) => {
+      const grid = byId('heatmap');
+      grid.replaceChildren();
+      const max = Math.max(1, ...days.map((day) => day.seconds));
+      for (const day of days) {
+        const cell = document.createElement('span');
+        const level = day.seconds <= 0 ? 0 : Math.min(4, Math.max(1, Math.ceil((day.seconds / max) * 4)));
+        cell.className = 'cell lvl' + level + (day.isFuture ? ' future' : '');
+        cell.title = longDate(day.date) + ' · ' + formatDuration(day.seconds);
+        grid.appendChild(cell);
+      }
+    };
     const renderActivity = (summary) => {
       const hours = byId('hours');
       const labels = byId('hour-labels');
@@ -277,7 +370,7 @@ export class DashboardPanel implements vscode.Disposable {
       const peak = byId('peak-hour');
       hours.replaceChildren();
       hours.style.gridTemplateColumns = '';
-      if (summary.timeframe === 'day') {
+      if (summary.dailyBreakdown.length === 0) {
         hours.classList.remove('daily');
         labels.hidden = false;
         title.textContent = 'Hourly activity';
@@ -337,35 +430,37 @@ export class DashboardPanel implements vscode.Disposable {
       progress.value = summary.goalProgressPercent;
       setList(byId('projects'), summary.projectBreakdown, 'project');
       setList(byId('languages'), summary.languageBreakdown, 'language');
-      const sessionList = byId('sessions');
-      sessionList.replaceChildren();
-      if (!summary.recentSessions.length) {
-        const empty = document.createElement('div');
-        empty.className = 'empty';
-        empty.textContent = 'No tracked sessions in this period.';
-        sessionList.appendChild(empty);
-      }
-      for (const session of summary.recentSessions) {
-        const row = document.createElement('div');
-        row.className = 'session';
-        const title = document.createElement('span');
-        title.className = 'session-title';
-        title.textContent = session.project + ' · ' + session.language;
-        const duration = document.createElement('span');
-        duration.className = 'session-duration';
-        duration.textContent = formatDuration(session.durationSeconds);
-        const date = document.createElement('span');
-        date.className = 'session-meta';
-        date.textContent = new Date(session.start).toLocaleString();
-        row.append(title, duration, date);
-        sessionList.appendChild(row);
-      }
+      lastSessions = summary.recentSessions;
+      renderSessions();
+      renderHeatmap(summary.heatmap);
       renderActivity(summary);
       byId('active-ratio').textContent = summary.activeRatioPercent + '%';
       byId('idle-ratio').textContent = summary.idleRatioPercent + '%';
     };
+    const applyCustomRange = () => {
+      const startDate = byId('range-start').value;
+      const endDate = byId('range-end').value;
+      if (!startDate || !endDate) {
+        byId('status').textContent = 'Choose a start and end date.';
+        return;
+      }
+      byId('status').textContent = '';
+      vscode.postMessage({ type: 'customRange', startDate, endDate });
+    };
     byId('timeframe').addEventListener('change', (event) => {
-      vscode.postMessage({ type: 'timeframe', value: event.target.value });
+      const value = event.target.value;
+      byId('custom-range').hidden = value !== 'custom';
+      if (value === 'custom') {
+        applyCustomRange();
+        return;
+      }
+      vscode.postMessage({ type: 'timeframe', value });
+    });
+    byId('range-start').addEventListener('change', applyCustomRange);
+    byId('range-end').addEventListener('change', applyCustomRange);
+    byId('sessions-toggle').addEventListener('click', () => {
+      showAllSessions = !showAllSessions;
+      renderSessions();
     });
     byId('export-json').addEventListener('click', () => vscode.postMessage({ type: 'export', format: 'json' }));
     byId('export-csv').addEventListener('click', () => vscode.postMessage({ type: 'export', format: 'csv' }));
@@ -374,6 +469,7 @@ export class DashboardPanel implements vscode.Disposable {
       if (message.type === 'state') render(message.summary);
       if (message.type === 'exported') byId('status').textContent = 'Exported to ' + message.path;
       if (message.type === 'exportCancelled') byId('status').textContent = 'Export cancelled.';
+      if (message.type === 'invalidRange') byId('status').textContent = 'The end date must be on or after the start date.';
     });
   </script>
 </body>
@@ -385,6 +481,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function isTimeframe(value: unknown): value is Timeframe {
+function isPresetTimeframe(value: unknown): value is Timeframe {
   return value === 'day' || value === 'week' || value === 'month';
 }

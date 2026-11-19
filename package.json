@@ -2,7 +2,7 @@
   "name": "codepulse-tracker",
   "displayName": "CodePulse Tracker",
   "description": "Offline-first productivity analytics dashboard for VS Code.",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "publisher": "codepulse-tracker",
   "license": "MIT",
   "repository": {
@@ -104,6 +104,14 @@
             "minimum": 1,
             "maximum": 1440,
             "scope": "window"
+          },
+          "codepulse.idleTimeoutMinutes": {
+            "type": "number",
+            "default": 5,
+            "description": "Minutes without typing or cursor movement before time stops being counted. Set to 0 to turn idle detection off.",
+            "minimum": 0,
+            "maximum": 120,
+            "scope": "window"
           }
         }
       }
@@ -114,7 +122,7 @@
     "typecheck": "tsc -p ./tsconfig.json --noEmit",
     "lint": "eslint src --max-warnings=0",
     "test": "npm run compile && node --test dist/test/**/*.test.js",
-    "package": "npm run compile && vsce package --out ./artifacts/codepulse-tracker-1.1.3.vsix",
+    "package": "npm run compile && vsce package --out ./artifacts/codepulse-tracker-1.1.4.vsix",
     "vscode:prepublish": "npm run compile"
   },
   "devDependencies": {
