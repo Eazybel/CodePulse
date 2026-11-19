@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 
 import { DataStore } from './core/dataStore';
-import { Timeframe } from './core/timeUtils';
+import { CustomDateRange, Timeframe } from './core/timeUtils';
 import { CodePulseTracker } from './core/tracker';
 import { DashboardPanel } from './dashboard';
 
@@ -15,7 +15,11 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   const tracker = new CodePulseTracker(context, dataStore);
 
-  const exportToFile = async (format: ExportFormat, timeframe?: Timeframe): Promise<string | undefined> => {
+  const exportToFile = async (
+    format: ExportFormat,
+    timeframe?: Timeframe,
+    customRange?: CustomDateRange,
+  ): Promise<string | undefined> => {
     const extension = format;
     const saveUri = await vscode.window.showSaveDialog({
       defaultUri: vscode.Uri.joinPath(context.globalStorageUri, `codepulse-export.${extension}`),
@@ -29,7 +33,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return undefined;
     }
 
-    return dataStore.exportData(saveUri.fsPath, format, timeframe);
+    return dataStore.exportData(saveUri.fsPath, format, timeframe, undefined, customRange);
   };
 
   tracker.setDashboardRefresh(() => DashboardPanel.currentPanel?.refresh());

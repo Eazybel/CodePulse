@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 
 import { ActiveCheckpoint, DataStore, sessionIdFor, StoredSession } from './dataStore';
-import { formatDurationMinutes, splitIntervalAtMidnight, TrackingMode } from './timeUtils';
+import { formatDurationMinutes, isIdleAt, splitIntervalAtMidnight, TrackingMode } from './timeUtils';
 
 const CHECKPOINT_INTERVAL_MS = 5_000;
 
@@ -44,6 +44,7 @@ export class CodePulseTracker implements vscode.Disposable {
   private lastTickMonotonic: bigint | undefined;
   private wallCursor: number | undefined;
   private activeElapsedMs = 0;
+  private lastActivityMs = Date.now();
   private focusLostAt: number | null = null;
   private activeProject = 'Workspace';
   private activeLanguage = 'Unknown';
@@ -73,12 +74,14 @@ export class CodePulseTracker implements vscode.Disposable {
   public start(): void {
     this.disposables.push(
       vscode.window.onDidChangeActiveTextEditor((editor) => {
+        this.markActivity();
         void this.changeAttribution(() => {
           this.activeProject = this.resolveProjectName(editor);
           this.activeLanguage = this.resolveLanguage(editor);
         });
       }),
       vscode.workspace.onDidChangeTextDocument((event) => {
+        this.markActivity();
         const editor = vscode.window.activeTextEditor;
         if (editor?.document === event.document && editor.document.languageId !== this.activeLanguage) {
           void this.changeAttribution(() => {
@@ -92,6 +95,7 @@ export class CodePulseTracker implements vscode.Disposable {
           this.activeLanguage = this.resolveLanguage(vscode.window.activeTextEditor);
         });
       }),
+      vscode.window.onDidChangeTextEditorSelection(() => this.markActivity()),
       vscode.window.onDidChangeWindowState(() => {
         void this.tick();
       }),
@@ -188,9 +192,17 @@ export class CodePulseTracker implements vscode.Disposable {
       }
 
       if (ownsLease && this.tracking) {
-        this.recordElapsed(now, monotonicNow);
+        if (this.isIdle(now)) {
+          // No typing or cursor movement for longer than the idle timeout: stop counting.
+          // The idle gap is never recorded, so the next active tick starts fresh from here.
+          this.flushPendingSegment();
+          this.lastTickMonotonic = monotonicNow;
+          this.wallCursor = now;
+        } else {
+          this.recordElapsed(now, monotonicNow);
+          this.updateCheckpoint(now);
+        }
         await this.renewLease(now);
-        this.updateCheckpoint(now);
       } else {
         if (this.tracking) {
           this.flushPendingSegment();
@@ -347,13 +359,24 @@ export class CodePulseTracker implements vscode.Disposable {
     return this.tracking && Date.now() - this.focusLostAt <= focusGracePeriodMs;
   }
 
+  private markActivity(): void {
+    this.lastActivityMs = Date.now();
+  }
+
+  private isIdle(now: number): boolean {
+    const configured = vscode.workspace.getConfiguration('codepulse').get<number>('idleTimeoutMinutes', 5) ?? 5;
+    return isIdleAt(this.lastActivityMs, now, Math.max(0, configured));
+  }
+
   private updateStatusBar(): void {
     // The status bar is the total for the local day across all projects and VS Code
     // windows, not the elapsed time since this workspace/window started tracking.
     this.dataStore.setLiveInterval(this.pendingSegment?.start ?? null);
     const todayMinutes = Math.floor(this.dataStore.getTodaySeconds() / 60);
     this.statusBarItem.text = `$(watch) ${formatDurationMinutes(todayMinutes)}`;
-    this.statusBarItem.tooltip = this.tracking
+    this.statusBarItem.tooltip = this.tracking && this.isIdle(Date.now())
+      ? 'CodePulse: Idle, so time is not being counted until you type or move the cursor. Click to open the dashboard.'
+      : this.tracking
       ? 'CodePulse: Time tracked today across projects (tracking now). Click to open the dashboard.'
       : 'CodePulse: Time tracked today across projects. Not tracking right now. Click to open the dashboard.';
   }

@@ -3,6 +3,8 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import {
+  CustomDateRange,
+  getCustomTimeframeRange,
   getLocalDateKey,
   getTimeframeRange,
   splitIntervalAtMidnight,
@@ -32,6 +34,12 @@ export interface StoredSession {
   mode: TrackingMode;
 }
 
+export interface HeatmapDay {
+  date: string;
+  seconds: number;
+  isFuture: boolean;
+}
+
 export interface DashboardSummary {
   timeframe: Timeframe;
   rangeStart: string;
@@ -53,6 +61,8 @@ export interface DashboardSummary {
   hourlyActivity: number[];
   /** One bar per day for weekly (Mon-Sun) and monthly (1..last day) modes; empty for daily mode. */
   dailyBreakdown: DailyBucket[];
+  /** Twelve full weeks (Monday to Sunday) ending with the current week, one entry per day. */
+  heatmap: HeatmapDay[];
   activeRatioPercent: number;
   idleRatioPercent: number;
 }
@@ -219,10 +229,13 @@ export class DataStore {
     format: 'json' | 'csv' = 'json',
     timeframe?: Timeframe,
     now: number = Date.now(),
+    customRange?: CustomDateRange,
   ): Promise<string> {
     const store = this.currentStore();
     store.reloadIfChanged();
-    const sessions = timeframe ? store.getSessionsForTimeframe(timeframe, now) : store.snapshot.sessions;
+    const sessions = customRange
+      ? store.getSessionsInRange(getCustomTimeframeRange(customRange))
+      : timeframe ? store.getSessionsForTimeframe(timeframe, now) : store.snapshot.sessions;
     const output = format === 'csv'
       ? sessionsToCsv(sessions)
       : JSON.stringify({ ...store.snapshot, sessions }, null, 2);
@@ -242,10 +255,11 @@ export class DataStore {
     now: number = Date.now(),
     dailyGoalMinutes = 120,
     timeframe: Timeframe = 'day',
+    customRange?: CustomDateRange,
   ): DashboardSummary {
     const store = this.currentStore();
     store.reloadIfChanged();
-    const range = getTimeframeRange(timeframe, now);
+    const range = customRange ? getCustomTimeframeRange(customRange) : getTimeframeRange(timeframe, now);
     const sessions = store.snapshot.sessions
       .filter((session) => session.localDate >= range.startDate && session.localDate <= range.endDate)
       .sort((left, right) => left.start - right.start);
@@ -286,7 +300,7 @@ export class DataStore {
       totalSeconds,
       totalSessions: sessions.length,
       activeDays: rangeDates.size,
-      recentSessions: sessions.slice(-8).reverse(),
+      recentSessions: sessions.slice(-MAX_RECENT_SESSIONS).reverse(),
       projectBreakdown,
       languageBreakdown,
       averageDailySeconds: rangeDates.size === 0 ? 0 : Math.round(totalSeconds / rangeDates.size),
@@ -299,6 +313,7 @@ export class DataStore {
       peakCodingHour: peakSeconds === 0 ? null : hourlyActivity.indexOf(peakSeconds),
       hourlyActivity,
       dailyBreakdown: buildDailyBreakdown(timeframe, range, sessions, now),
+      heatmap: buildHeatmap(store.snapshot.sessions, now, store.getTodaySeconds(now)),
       activeRatioPercent,
       idleRatioPercent: 100 - activeRatioPercent,
     };
@@ -393,9 +408,11 @@ export class DataStore {
   }
 
   private getSessionsForTimeframe(timeframe: Timeframe, now: number): StoredSession[] {
-    const store = this.currentStore();
-    const range = getTimeframeRange(timeframe, now);
-    return store.snapshot.sessions.filter(
+    return this.getSessionsInRange(getTimeframeRange(timeframe, now));
+  }
+
+  private getSessionsInRange(range: { startDate: string; endDate: string }): StoredSession[] {
+    return this.currentStore().snapshot.sessions.filter(
       (session) => session.localDate >= range.startDate && session.localDate <= range.endDate,
     );
   }
@@ -720,6 +737,32 @@ function clipSessionsAfter(sessions: StoredSession[], cutoff: number): StoredSes
 }
 
 const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MAX_RECENT_SESSIONS = 50;
+const HEATMAP_WEEKS = 12;
+
+function buildHeatmap(sessions: StoredSession[], now: number, todaySeconds: number): HeatmapDay[] {
+  const today = new Date(now);
+  const todayKey = getLocalDateKey(today);
+  // Start on the Monday of the earliest week shown, then run to the Sunday of the current week.
+  const mondayOffset = (today.getDay() + 6) % 7;
+  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate() - mondayOffset - (HEATMAP_WEEKS - 1) * 7);
+  const secondsByDate = new Map<string, number>();
+  for (const session of sessions) {
+    secondsByDate.set(session.localDate, (secondsByDate.get(session.localDate) ?? 0) + session.durationSeconds);
+  }
+
+  const days: HeatmapDay[] = [];
+  for (let offset = 0; offset < HEATMAP_WEEKS * 7; offset += 1) {
+    const day = new Date(start.getFullYear(), start.getMonth(), start.getDate() + offset);
+    const date = getLocalDateKey(day);
+    days.push({
+      date,
+      seconds: date === todayKey ? todaySeconds : (secondsByDate.get(date) ?? 0),
+      isFuture: date > todayKey,
+    });
+  }
+  return days;
+}
 
 function buildDailyBreakdown(
   timeframe: Timeframe,
@@ -727,7 +770,7 @@ function buildDailyBreakdown(
   sessions: StoredSession[],
   now: number,
 ): DailyBucket[] {
-  if (timeframe === 'day') {
+  if (timeframe !== 'week' && timeframe !== 'month') {
     return [];
   }
 

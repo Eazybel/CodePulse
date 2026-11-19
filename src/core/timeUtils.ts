@@ -1,5 +1,12 @@
 export type TrackingMode = 'alwaysOpen' | 'windowFocused';
-export type Timeframe = 'day' | 'week' | 'month';
+export type Timeframe = 'day' | 'week' | 'month' | 'custom';
+
+export interface CustomDateRange {
+  /** Inclusive local start date, YYYY-MM-DD. */
+  startDate: string;
+  /** Inclusive local end date, YYYY-MM-DD. */
+  endDate: string;
+}
 
 export interface IntervalSegment {
   start: number;
@@ -84,6 +91,45 @@ export function getTimeframeRange(timeframe: Timeframe, now: number = Date.now()
     startDate: getLocalDateKey(startDate),
     endDate: getLocalDateKey(endOfRange),
   };
+}
+
+const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Parses a YYYY-MM-DD key to local midnight; returns undefined for malformed or impossible dates (e.g. 2026-02-30). */
+export function parseDateKey(key: string): Date | undefined {
+  if (!DATE_KEY_PATTERN.test(key)) {
+    return undefined;
+  }
+  const [year, month, day] = key.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+  return getLocalDateKey(date) === key ? date : undefined;
+}
+
+export function isValidCustomRange(range: CustomDateRange): boolean {
+  return parseDateKey(range.startDate) !== undefined
+    && parseDateKey(range.endDate) !== undefined
+    && range.startDate <= range.endDate;
+}
+
+/** Range for a user-picked start and end date, covering both days in full. */
+export function getCustomTimeframeRange(range: CustomDateRange): TimeframeRange {
+  const start = parseDateKey(range.startDate) ?? new Date();
+  const end = parseDateKey(range.endDate) ?? new Date();
+  end.setHours(23, 59, 59, 999);
+  return {
+    start: start.getTime(),
+    end: end.getTime(),
+    startDate: range.startDate,
+    endDate: range.endDate,
+  };
+}
+
+/** True when no user activity has been seen for longer than the timeout. A timeout of 0 disables idle detection. */
+export function isIdleAt(lastActivityMs: number, now: number, idleTimeoutMinutes: number): boolean {
+  if (idleTimeoutMinutes <= 0) {
+    return false;
+  }
+  return now - lastActivityMs > idleTimeoutMinutes * 60_000;
 }
 
 export function formatDuration(totalSeconds: number): string {
